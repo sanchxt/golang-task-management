@@ -9,10 +9,10 @@ import (
 )
 
 var (
-	// Styles for the welcome message
+	// welcome message styles
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#7D56F4")).
+			Foreground(lipgloss.Color("#8aa4eb")).
 			PaddingTop(1).
 			PaddingBottom(1)
 
@@ -32,7 +32,6 @@ modern project management tools.`,
 	},
 }
 
-// Execute runs the root command
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -40,10 +39,15 @@ func Execute() {
 	}
 }
 
-// displayWelcome shows the welcome message
 func displayWelcome() {
-	title := titleStyle.Render("Welcome to Your Favorite Task Management Tool")
-	subtitle := subtitleStyle.Render("✨ TaskFlow - Manage tasks like a pro")
+	title := titleStyle.Render(`
+		------------------------------------------------------
+		
+		                T A S K F L O W
+		
+		------------------------------------------------------
+	`)
+	subtitle := subtitleStyle.Render("Manage your days like never before <3")
 
 	fmt.Println()
 	fmt.Println(title)
