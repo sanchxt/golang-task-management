@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
 	"task-management/internal/config"
 	"task-management/internal/domain"
 	"task-management/internal/repository/sqlite"
+	"task-management/internal/theme"
 )
 
 var (
@@ -21,18 +21,6 @@ var (
 	addProject     string
 	addTags        []string
 	addDueDate     string
-
-	// styles
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#04B575")).
-			Bold(true)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF0000")).
-			Bold(true)
-
-	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7D56F4"))
 )
 
 var addCmd = &cobra.Command{
@@ -64,10 +52,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	title := strings.Join(args, " ")
 
 	// get config
-	cfg, err := config.GetDefaultConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get config: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// load theme
+	themeName := cfg.ThemeName
+	if themeName == "" {
+		themeName = "default"
+	}
+	themeObj, err := theme.GetTheme(themeName)
+	if err != nil {
+		return fmt.Errorf("failed to load theme: %w", err)
+	}
+
+	// create styles from theme
+	styles := theme.NewStyles(themeObj)
 
 	// initialize db
 	db, err := sqlite.NewDB(sqlite.Config{Path: cfg.DBPath})
@@ -88,8 +89,8 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if addDueDate != "" {
 		dueDate, err := parseDueDate(addDueDate)
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("✗ Invalid due date format: %v", err)))
-			fmt.Println(infoStyle.Render("  Use YYYY-MM-DD format (e.g., 2024-12-31)"))
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Invalid due date format: %v", err)))
+			fmt.Println(styles.Info.Render("  Use YYYY-MM-DD format (e.g., 2024-12-31)"))
 			return nil
 		}
 		task.DueDate = dueDate
@@ -98,11 +99,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// save to db
 	ctx := context.Background()
 	if err := repo.Create(ctx, task); err != nil {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("✗ Failed to create task: %v", err)))
+		fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to create task: %v", err)))
 		return nil
 	}
 
-	displayTaskCreated(task)
+	displayTaskCreated(task, styles)
 
 	return nil
 }
@@ -125,31 +126,31 @@ func parseDueDate(dateStr string) (*time.Time, error) {
 	return nil, fmt.Errorf("unable to parse date: %s", dateStr)
 }
 
-func displayTaskCreated(task *domain.Task) {
+func displayTaskCreated(task *domain.Task, styles *theme.Styles) {
 	fmt.Println()
-	fmt.Println(successStyle.Render(fmt.Sprintf("✓ Task #%d created successfully!", task.ID)))
+	fmt.Println(styles.Success.Render(fmt.Sprintf("✓ Task #%d created successfully!", task.ID)))
 	fmt.Println()
 
 	// task details
-	fmt.Printf("  %s %s\n", infoStyle.Render("Title:"), task.Title)
+	fmt.Printf("  %s %s\n", styles.Info.Render("Title:"), task.Title)
 
 	if task.Description != "" {
-		fmt.Printf("  %s %s\n", infoStyle.Render("Description:"), task.Description)
+		fmt.Printf("  %s %s\n", styles.Info.Render("Description:"), task.Description)
 	}
 
-	fmt.Printf("  %s %s\n", infoStyle.Render("Priority:"), task.Priority)
-	fmt.Printf("  %s %s\n", infoStyle.Render("Status:"), task.Status)
+	fmt.Printf("  %s %s\n", styles.Info.Render("Priority:"), task.Priority)
+	fmt.Printf("  %s %s\n", styles.Info.Render("Status:"), task.Status)
 
 	if task.Project != "" {
-		fmt.Printf("  %s %s\n", infoStyle.Render("Project:"), task.Project)
+		fmt.Printf("  %s %s\n", styles.Info.Render("Project:"), task.Project)
 	}
 
 	if len(task.Tags) > 0 {
-		fmt.Printf("  %s %s\n", infoStyle.Render("Tags:"), strings.Join(task.Tags, ", "))
+		fmt.Printf("  %s %s\n", styles.Info.Render("Tags:"), strings.Join(task.Tags, ", "))
 	}
 
 	if task.DueDate != nil {
-		fmt.Printf("  %s %s\n", infoStyle.Render("Due Date:"), task.DueDate.Format("2006-01-02"))
+		fmt.Printf("  %s %s\n", styles.Info.Render("Due Date:"), task.DueDate.Format("2006-01-02"))
 	}
 
 	fmt.Println()

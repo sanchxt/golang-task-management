@@ -10,8 +10,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"task-management/internal/display"
 	"task-management/internal/domain"
 	"task-management/internal/repository"
+	"task-management/internal/theme"
 )
 
 type viewMode int
@@ -33,10 +35,12 @@ type Model struct {
 	width          int
 	height         int
 	showHelp       bool
+	theme          *theme.Theme
+	styles         *theme.Styles
 }
 
 // creates a new TUI model
-func NewModel(repo repository.TaskRepository, tasks []*domain.Task) Model {
+func NewModel(repo repository.TaskRepository, tasks []*domain.Task, themeObj *theme.Theme, styles *theme.Styles) Model {
 	// table columns
 	columns := []table.Column{
 		{Title: "Status", Width: 15},
@@ -65,12 +69,12 @@ func NewModel(repo repository.TaskRepository, tasks []*domain.Task) Model {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(lipgloss.Color(themeObj.BorderColor)).
 		BorderBottom(true).
 		Bold(true)
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
+		Foreground(lipgloss.Color(themeObj.SelectedFg)).
+		Background(lipgloss.Color(themeObj.SelectedBg)).
 		Bold(true)
 	t.SetStyles(s)
 
@@ -80,6 +84,8 @@ func NewModel(repo repository.TaskRepository, tasks []*domain.Task) Model {
 		table:    t,
 		keys:     defaultKeyMap(),
 		viewMode: tableView,
+		theme:    themeObj,
+		styles:   styles,
 	}
 }
 
@@ -155,7 +161,7 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// title
-	title := titleStyle.Render("  TaskFlow TUI  ")
+	title := m.styles.TUITitle.Render("  TaskFlow TUI  ")
 	b.WriteString(title)
 	b.WriteString("\n")
 
@@ -176,7 +182,7 @@ func (m Model) View() string {
 func (m Model) renderTableView() string {
 	var b strings.Builder
 
-	subtitle := subtitleStyle.Render(fmt.Sprintf("Total: %d task(s)", len(m.tasks)))
+	subtitle := m.styles.TUISubtitle.Render(fmt.Sprintf("Total: %d task(s)", len(m.tasks)))
 	b.WriteString(subtitle)
 	b.WriteString("\n\n")
 
@@ -202,47 +208,47 @@ func (m Model) renderDetailView() string {
 	content := []string{}
 
 	// ID and title
-	content = append(content, renderDetailRow("ID:", fmt.Sprintf("#%d", task.ID)))
-	content = append(content, renderDetailRow("Title:", task.Title))
+	content = append(content, m.renderDetailRow("ID:", fmt.Sprintf("#%d", task.ID)))
+	content = append(content, m.renderDetailRow("Title:", task.Title))
 
 	// description
 	if task.Description != "" {
-		content = append(content, renderDetailRow("Description:", wrapText(task.Description, 60)))
+		content = append(content, m.renderDetailRow("Description:", wrapText(task.Description, 60)))
 	}
 
 	// status
-	statusStyle := getStatusStyle(string(task.Status))
+	statusStyle := m.styles.GetStatusStyle(task.Status)
 	statusText := statusStyle.Render(string(task.Status))
-	content = append(content, renderDetailRow("Status:", statusText))
+	content = append(content, m.renderDetailRow("Status:", statusText))
 
 	// priority
-	priorityStyle := getPriorityStyle(string(task.Priority))
+	priorityStyle := m.styles.GetPriorityTextStyle(task.Priority)
 	priorityText := priorityStyle.Render(string(task.Priority))
-	content = append(content, renderDetailRow("Priority:", priorityText))
+	content = append(content, m.renderDetailRow("Priority:", priorityText))
 
 	// project
 	if task.Project != "" {
-		content = append(content, renderDetailRow("Project:", task.Project))
+		content = append(content, m.renderDetailRow("Project:", task.Project))
 	}
 
 	// tags
 	if len(task.Tags) > 0 {
 		tagsText := strings.Join(task.Tags, ", ")
-		content = append(content, renderDetailRow("Tags:", tagsText))
+		content = append(content, m.renderDetailRow("Tags:", tagsText))
 	}
 
 	// due date
 	if task.DueDate != nil {
 		dueText := formatDetailDueDate(task.DueDate)
-		content = append(content, renderDetailRow("Due Date:", dueText))
+		content = append(content, m.renderDetailRow("Due Date:", dueText))
 	}
 
 	// timestamps
-	content = append(content, renderDetailRow("Created:", task.CreatedAt.Format("2006-01-02 15:04:05")))
-	content = append(content, renderDetailRow("Updated:", task.UpdatedAt.Format("2006-01-02 15:04:05")))
+	content = append(content, m.renderDetailRow("Created:", task.CreatedAt.Format("2006-01-02 15:04:05")))
+	content = append(content, m.renderDetailRow("Updated:", task.UpdatedAt.Format("2006-01-02 15:04:05")))
 
 	cardContent := strings.Join(content, "\n")
-	card := detailContainerStyle.Render(cardContent)
+	card := m.styles.DetailContainer.Render(cardContent)
 
 	b.WriteString(card)
 
@@ -272,7 +278,7 @@ func (m Model) renderHelp() string {
 				"  ?           Toggle help",
 			}
 		}
-		return helpStyle.Render(strings.Join(help, "\n"))
+		return m.styles.TUIHelp.Render(strings.Join(help, "\n"))
 	}
 
 	var hints []string
@@ -291,17 +297,17 @@ func (m Model) renderHelp() string {
 			"?: help",
 		}
 	}
-	return helpStyle.Render(strings.Join(hints, "  •  "))
+	return m.styles.TUIHelp.Render(strings.Join(hints, "  •  "))
 }
 
 // convert task -> table row
 func taskToRow(task *domain.Task) table.Row {
 	// status
-	statusIcon := getStatusIcon(task.Status)
+	statusIcon := display.GetStatusIcon(task.Status)
 	status := fmt.Sprintf("%s %s", statusIcon, task.Status)
 
 	// priority
-	priorityIcon := getPriorityIcon(task.Priority)
+	priorityIcon := display.GetPriorityIcon(task.Priority)
 	priority := fmt.Sprintf("%s %s", priorityIcon, task.Priority)
 
 	// truncate title
@@ -328,7 +334,7 @@ func taskToRow(task *domain.Task) table.Row {
 	// due date
 	dueDate := "-"
 	if task.DueDate != nil {
-		dueDate = formatDueDate(task.DueDate)
+		dueDate = display.FormatDueDate(task.DueDate)
 	}
 
 	return table.Row{
@@ -342,8 +348,8 @@ func taskToRow(task *domain.Task) table.Row {
 }
 
 // detail row
-func renderDetailRow(label, value string) string {
-	return detailLabelStyle.Render(label) + " " + detailValueStyle.Render(value)
+func (m Model) renderDetailRow(label, value string) string {
+	return m.styles.DetailLabel.Render(label) + " " + m.styles.DetailValue.Render(value)
 }
 
 // wraps text
@@ -458,63 +464,4 @@ func (m *Model) navigateToNextTask() {
 
 	m.selectedTask = m.tasks[nextIndex]
 	m.table.SetCursor(nextIndex)
-}
-
-// helper functions
-func getStatusIcon(status domain.Status) string {
-	switch status {
-	case domain.StatusCompleted:
-		return "✓"
-	case domain.StatusInProgress:
-		return "⚡"
-	case domain.StatusPending:
-		return "○"
-	case domain.StatusCancelled:
-		return "✗"
-	default:
-		return "?"
-	}
-}
-
-func getPriorityIcon(priority domain.Priority) string {
-	switch priority {
-	case domain.PriorityUrgent:
-		return "🔥"
-	case domain.PriorityHigh:
-		return "⬆"
-	case domain.PriorityMedium:
-		return "➡"
-	case domain.PriorityLow:
-		return "⬇"
-	default:
-		return "?"
-	}
-}
-
-func formatDueDate(dueDate *time.Time) string {
-	if dueDate == nil {
-		return "-"
-	}
-
-	now := time.Now()
-	diff := dueDate.Sub(now)
-
-	if diff < 0 {
-		days := int(-diff.Hours() / 24)
-		if days == 0 {
-			return "TODAY!"
-		}
-		return fmt.Sprintf("-%dd", days)
-	}
-
-	days := int(diff.Hours() / 24)
-	if days == 0 {
-		return "Today"
-	} else if days == 1 {
-		return "Tomorrow"
-	} else if days <= 7 {
-		return fmt.Sprintf("%dd", days)
-	}
-
-	return dueDate.Format("2006-01-02")
 }
