@@ -9,8 +9,10 @@ import (
 )
 
 type Config struct {
-	DBPath    string `mapstructure:"db_path"`
-	ThemeName string `mapstructure:"theme_name"`
+	DBPath          string `mapstructure:"db_path"`
+	ThemeName       string `mapstructure:"theme_name"`
+	DefaultPageSize int    `mapstructure:"default_page_size"`
+	MaxPageSize     int    `mapstructure:"max_page_size"`
 }
 
 var (
@@ -70,8 +72,15 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// apply defaults if not set
 	if cfg.DBPath == "" {
 		cfg.DBPath = filepath.Join(configDir, "tasks.db")
+	}
+	if cfg.DefaultPageSize == 0 {
+		cfg.DefaultPageSize = 20
+	}
+	if cfg.MaxPageSize == 0 {
+		cfg.MaxPageSize = 100
 	}
 
 	return &cfg, nil
@@ -85,6 +94,8 @@ func SaveConfig(cfg *Config) error {
 
 	viper.Set("db_path", cfg.DBPath)
 	viper.Set("theme_name", cfg.ThemeName)
+	viper.Set("default_page_size", cfg.DefaultPageSize)
+	viper.Set("max_page_size", cfg.MaxPageSize)
 
 	if err := viper.WriteConfigAs(configFile); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
@@ -96,8 +107,10 @@ func SaveConfig(cfg *Config) error {
 // returns default config
 func GetDefaultConfig() *Config {
 	return &Config{
-		DBPath:    filepath.Join(configDir, "tasks.db"),
-		ThemeName: "",
+		DBPath:          filepath.Join(configDir, "tasks.db"),
+		ThemeName:       "",
+		DefaultPageSize: 20,
+		MaxPageSize:     100,
 	}
 }
 

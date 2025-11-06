@@ -24,6 +24,17 @@ var (
 	listProject  string
 	listTags     []string
 	listCLI      bool
+
+	// pagination flags
+	listPage     int
+	listPageSize int
+	listAll      bool
+
+	// search flags
+	listSearch    string
+	listRegex     bool
+	listSortBy    string
+	listSortOrder string
 )
 
 var listCmd = &cobra.Command{
@@ -65,22 +76,33 @@ Examples:
 func init() {
 	rootCmd.AddCommand(listCmd)
 
-	// flags
+	// display flags
 	listCmd.Flags().BoolVar(&listCLI, "cli", false, "Display as text table instead of TUI")
+
+	// filter flags
 	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (pending, in_progress, completed, cancelled)")
 	listCmd.Flags().StringVarP(&listPriority, "priority", "p", "", "Filter by priority (low, medium, high, urgent)")
 	listCmd.Flags().StringVarP(&listProject, "project", "P", "", "Filter by project")
 	listCmd.Flags().StringSliceVarP(&listTags, "tags", "t", []string{}, "Filter by tags (comma-separated)")
+
+	// pagination flags
+	listCmd.Flags().IntVar(&listPage, "page", 1, "Page number (starts at 1)")
+	listCmd.Flags().IntVar(&listPageSize, "page-size", 0, "Number of tasks per page (0 = use config default)")
+	listCmd.Flags().BoolVar(&listAll, "all", false, "Show all tasks (disable pagination)")
+
+	// search flags
+	listCmd.Flags().StringVar(&listSearch, "search", "", "Search query (searches in title, description, project, tags)")
+	listCmd.Flags().BoolVar(&listRegex, "regex", false, "Use regex mode for search")
+	listCmd.Flags().StringVar(&listSortBy, "sort-by", "created_at", "Sort by field (created_at, updated_at, priority, due_date, title)")
+	listCmd.Flags().StringVar(&listSortOrder, "sort-order", "desc", "Sort order (asc, desc)")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	// get config
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// load theme
 	themeName := cfg.ThemeName
 	if themeName == "" {
 		themeName = "default"
@@ -90,10 +112,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load theme: %w", err)
 	}
 
-	// create styles from theme
 	styles := theme.NewStyles(themeObj)
 
-	// initialize db
 	db, err := sqlite.NewDB(sqlite.Config{Path: cfg.DBPath})
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
@@ -101,17 +121,54 @@ func runList(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	repo := sqlite.NewTaskRepository(db)
+	ctx := context.Background()
+
+	// determine page size
+	pageSize := listPageSize
+	if pageSize == 0 {
+		pageSize = cfg.DefaultPageSize
+	}
+	if pageSize > cfg.MaxPageSize {
+		pageSize = cfg.MaxPageSize
+	}
 
 	// build filter
 	filter := repository.TaskFilter{
-		Status:   domain.Status(listStatus),
-		Priority: domain.Priority(listPriority),
-		Project:  listProject,
-		Tags:     listTags,
+		Status:      domain.Status(listStatus),
+		Priority:    domain.Priority(listPriority),
+		Project:     listProject,
+		Tags:        listTags,
+		SearchQuery: listSearch,
+		SortBy:      listSortBy,
+		SortOrder:   listSortOrder,
+	}
+
+	// search mode
+	if listRegex {
+		filter.SearchMode = "regex"
+	} else if listSearch != "" {
+		filter.SearchMode = "text"
+	}
+
+	if !listAll && listCLI {
+		if listPage < 1 {
+			listPage = 1
+		}
+		filter.Limit = pageSize
+		filter.Offset = (listPage - 1) * pageSize
+	}
+
+	// total count for pagination info
+	totalCount, err := repo.Count(ctx, filter)
+	if err != nil {
+		if listCLI {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to count tasks: %v", err)))
+			return nil
+		}
+		return fmt.Errorf("failed to count tasks: %w", err)
 	}
 
 	// fetch tasks
-	ctx := context.Background()
 	tasks, err := repo.List(ctx, filter)
 	if err != nil {
 		if listCLI {
@@ -121,24 +178,30 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list tasks: %w", err)
 	}
 
-	// filter by tags manually (todo: make repo support it)
-	if len(listTags) > 0 {
-		tasks = filterTasksByTags(tasks, listTags)
-	}
-
 	// handle empty tasks
 	if len(tasks) == 0 && listCLI {
 		fmt.Println()
-		fmt.Println(styles.Info.Render("No tasks found."))
+		if hasActiveFilters(filter) {
+			fmt.Println(styles.Info.Render("No tasks found matching the filters."))
+			displayActiveFilters(filter, styles)
+		} else {
+			fmt.Println(styles.Info.Render("No tasks found."))
+		}
 		fmt.Println()
 		return nil
 	}
 
 	// mode to use
 	if listCLI {
-		displayTasksTable(tasks, styles)
+		totalPages := int((totalCount + int64(pageSize) - 1) / int64(pageSize))
+		if listAll {
+			listPage = 1
+			totalPages = 1
+		}
+
+		displayTasksTable(tasks, styles, filter, listPage, totalPages, totalCount)
 	} else {
-		model := tui.NewModel(repo, tasks, themeObj, styles)
+		model := tui.NewModel(repo, filter, pageSize, themeObj, styles)
 		p := tea.NewProgram(model, tea.WithAltScreen())
 
 		if _, err := p.Run(); err != nil {
@@ -149,38 +212,51 @@ func runList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func filterTasksByTags(tasks []*domain.Task, filterTags []string) []*domain.Task {
-	if len(filterTags) == 0 {
-		return tasks
-	}
-
-	filtered := make([]*domain.Task, 0)
-	for _, task := range tasks {
-		if hasAllTags(task.Tags, filterTags) {
-			filtered = append(filtered, task)
-		}
-	}
-	return filtered
+// checks if any filters are active
+func hasActiveFilters(filter repository.TaskFilter) bool {
+	return filter.Status != "" ||
+		filter.Priority != "" ||
+		filter.Project != "" ||
+		len(filter.Tags) > 0 ||
+		filter.SearchQuery != ""
 }
 
-func hasAllTags(taskTags, filterTags []string) bool {
-	for _, filterTag := range filterTags {
-		found := false
-		for _, taskTag := range taskTags {
-			if taskTag == filterTag {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-func displayTasksTable(tasks []*domain.Task, styles *theme.Styles) {
+// displays active filters summary
+func displayActiveFilters(filter repository.TaskFilter, styles *theme.Styles) {
 	fmt.Println()
+	fmt.Println(styles.Subtitle.Render("Active filters:"))
+
+	if filter.Status != "" {
+		fmt.Printf("  Status: %s\n", filter.Status)
+	}
+	if filter.Priority != "" {
+		fmt.Printf("  Priority: %s\n", filter.Priority)
+	}
+	if filter.Project != "" {
+		fmt.Printf("  Project: %s\n", filter.Project)
+	}
+	if len(filter.Tags) > 0 {
+		fmt.Printf("  Tags: %s\n", strings.Join(filter.Tags, ", "))
+	}
+	if filter.SearchQuery != "" {
+		mode := "text"
+		if filter.SearchMode == "regex" {
+			mode = "regex"
+		}
+		fmt.Printf("  Search (%s): %s\n", mode, filter.SearchQuery)
+	}
+	if filter.SortBy != "created_at" || filter.SortOrder != "desc" {
+		fmt.Printf("  Sort: %s %s\n", filter.SortBy, filter.SortOrder)
+	}
+}
+
+func displayTasksTable(tasks []*domain.Task, styles *theme.Styles, filter repository.TaskFilter, currentPage, totalPages int, totalCount int64) {
+	fmt.Println()
+
+	if hasActiveFilters(filter) {
+		displayActiveFilters(filter, styles)
+		fmt.Println()
+	}
 
 	headers := []string{
 		styles.Header.Render("Status"),
@@ -200,7 +276,25 @@ func displayTasksTable(tasks []*domain.Task, styles *theme.Styles) {
 	}
 
 	fmt.Println()
-	fmt.Printf("Total: %d task(s)\n", len(tasks))
+
+	// pagination info
+	if filter.Limit > 0 {
+		startIdx := filter.Offset + 1
+		endIdx := filter.Offset + len(tasks)
+
+		paginationInfo := fmt.Sprintf("Showing %d-%d of %d tasks (Page %d of %d)",
+			startIdx, endIdx, totalCount, currentPage, totalPages)
+
+		fmt.Println(styles.Subtitle.Render(paginationInfo))
+
+		if currentPage < totalPages {
+			nextPageHint := fmt.Sprintf("Use --page %d to see the next page", currentPage+1)
+			fmt.Println(styles.Info.Render(nextPageHint))
+		}
+	} else {
+		fmt.Printf("Total: %d task(s)\n", totalCount)
+	}
+
 	fmt.Println()
 }
 

@@ -5,9 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sync"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
+)
+
+var (
+	registerOnce sync.Once
 )
 
 type DB struct {
@@ -25,8 +32,18 @@ func NewDB(cfg Config) (*DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
+	// register REGEXP function once
+	registerOnce.Do(func() {
+		sql.Register("sqlite3_with_regexp",
+			&sqlite3.SQLiteDriver{
+				ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+					return conn.RegisterFunc("regexp", regexpFunc, true)
+				},
+			})
+	})
+
 	// open SQLite connection
-	db, err := sqlx.Open("sqlite3", cfg.Path)
+	db, err := sqlx.Open("sqlite3_with_regexp", cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -46,6 +63,15 @@ func NewDB(cfg Config) (*DB, error) {
 	}
 
 	return &DB{DB: db}, nil
+}
+
+// REGEXP function for SQLite
+func regexpFunc(pattern, text string) (bool, error) {
+	matched, err := regexp.MatchString(pattern, text)
+	if err != nil {
+		return false, err
+	}
+	return matched, nil
 }
 
 // executes db schema

@@ -66,7 +66,7 @@ func (dt *dbTask) toTask() (*domain.Task, error) {
 	return task, nil
 }
 
-// inserts a new task into the database
+// insert a new task
 func (r *TaskRepository) Create(ctx context.Context, task *domain.Task) error {
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -114,7 +114,6 @@ func (r *TaskRepository) Create(ctx context.Context, task *domain.Task) error {
 		return fmt.Errorf("failed to insert task: %w", err)
 	}
 
-	// get the inserted ID
 	id, err := result.LastInsertId()
 	if err != nil {
 		return fmt.Errorf("failed to get last insert ID: %w", err)
@@ -143,29 +142,36 @@ func (r *TaskRepository) GetByID(ctx context.Context, id int64) (*domain.Task, e
 	return dbTask.toTask()
 }
 
-// get all tasks with (with filtering)
+// count tasks with filtering (for pagination)
+func (r *TaskRepository) Count(ctx context.Context, filter repository.TaskFilter) (int64, error) {
+	query, args := r.buildWhereClause(filter, true)
+
+	var count int64
+	if err := r.db.GetContext(ctx, &count, query, args...); err != nil {
+		return 0, fmt.Errorf("failed to count tasks: %w", err)
+	}
+
+	return count, nil
+}
+
+// get all tasks (with filters)
 func (r *TaskRepository) List(ctx context.Context, filter repository.TaskFilter) ([]*domain.Task, error) {
-	query := `
-		SELECT id, title, description, priority, status, tags, project, created_at, updated_at, due_date
-		FROM tasks
-		WHERE 1=1
-	`
-	args := make([]interface{}, 0)
+	query, args := r.buildWhereClause(filter, false)
 
-	if filter.Status != "" {
-		query += " AND status = ?"
-		args = append(args, filter.Status)
-	}
-	if filter.Priority != "" {
-		query += " AND priority = ?"
-		args = append(args, filter.Priority)
-	}
-	if filter.Project != "" {
-		query += " AND project = ?"
-		args = append(args, filter.Project)
-	}
+	// add sorting
+	orderClause := r.buildOrderClause(filter)
+	query += orderClause
 
-	query += " ORDER BY created_at DESC"
+	// add pagination
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
+
+		if filter.Offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, filter.Offset)
+		}
+	}
 
 	var dbTasks []dbTask
 	if err := r.db.SelectContext(ctx, &dbTasks, query, args...); err != nil {
@@ -182,6 +188,132 @@ func (r *TaskRepository) List(ctx context.Context, filter repository.TaskFilter)
 	}
 
 	return tasks, nil
+}
+
+// constructs the WHERE clause with all filters
+func (r *TaskRepository) buildWhereClause(filter repository.TaskFilter, isCount bool) (string, []interface{}) {
+	var query string
+	if isCount {
+		query = "SELECT COUNT(*) FROM tasks WHERE 1=1"
+	} else {
+		query = "SELECT id, title, description, priority, status, tags, project, created_at, updated_at, due_date FROM tasks WHERE 1=1"
+	}
+
+	args := make([]interface{}, 0)
+
+	// basic filters
+	if filter.Status != "" {
+		query += " AND status = ?"
+		args = append(args, filter.Status)
+	}
+	if filter.Priority != "" {
+		query += " AND priority = ?"
+		args = append(args, filter.Priority)
+	}
+	if filter.Project != "" {
+		query += " AND project = ?"
+		args = append(args, filter.Project)
+	}
+
+	// tag filtering using JSON functions
+	if len(filter.Tags) > 0 {
+		for _, tag := range filter.Tags {
+			query += " AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE value = ?)"
+			args = append(args, tag)
+		}
+	}
+
+	// search query
+	if filter.SearchQuery != "" {
+		if filter.SearchMode == "regex" {
+			query += ` AND (
+				title REGEXP ? OR
+				COALESCE(description, '') REGEXP ? OR
+				COALESCE(project, '') REGEXP ? OR
+				COALESCE(tags, '') REGEXP ?
+			)`
+			for range 4 {
+				args = append(args, filter.SearchQuery)
+			}
+		} else {
+			searchPattern := "%" + filter.SearchQuery + "%"
+			query += ` AND (
+				title LIKE ? COLLATE NOCASE OR
+				COALESCE(description, '') LIKE ? COLLATE NOCASE OR
+				COALESCE(project, '') LIKE ? COLLATE NOCASE OR
+				COALESCE(tags, '') LIKE ? COLLATE NOCASE
+			)`
+			for range 4 {
+				args = append(args, searchPattern)
+			}
+		}
+	}
+
+	// date range filtering
+	if filter.DueDateFrom != nil {
+		query += " AND due_date >= ?"
+		args = append(args, *filter.DueDateFrom)
+	}
+	if filter.DueDateTo != nil {
+		query += " AND due_date <= ?"
+		args = append(args, *filter.DueDateTo)
+	}
+
+	return query, args
+}
+
+// constructs the ORDER BY clause
+func (r *TaskRepository) buildOrderClause(filter repository.TaskFilter) string {
+	sortBy := filter.SortBy
+	sortOrder := filter.SortOrder
+
+	// default sort
+	if sortBy == "" {
+		sortBy = "created_at"
+	}
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+
+	// validate sortOrder
+	if sortOrder != "asc" && sortOrder != "desc" {
+		sortOrder = "desc"
+	}
+
+	// map priority to numeric values for sorting
+	if sortBy == "priority" {
+		return fmt.Sprintf(` ORDER BY
+			CASE priority
+				WHEN 'urgent' THEN 4
+				WHEN 'high' THEN 3
+				WHEN 'medium' THEN 2
+				WHEN 'low' THEN 1
+				ELSE 0
+			END %s, created_at DESC`, sortOrder)
+	}
+
+	// map to actual column names
+	validColumns := map[string]string{
+		"created_at": "created_at",
+		"updated_at": "updated_at",
+		"due_date":   "due_date",
+		"title":      "title",
+	}
+
+	column, ok := validColumns[sortBy]
+	if !ok {
+		column = "created_at"
+	}
+
+	// handle null values for due_date (nulls last)
+	if column == "due_date" {
+		if sortOrder == "asc" {
+			return fmt.Sprintf(" ORDER BY %s IS NULL, %s ASC", column, column)
+		}
+		return fmt.Sprintf(" ORDER BY %s IS NULL, %s DESC", column, column)
+	}
+
+	return fmt.Sprintf(" ORDER BY %s %s", column, sortOrder)
 }
 
 // modify a task
