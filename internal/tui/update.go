@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"task-management/internal/domain"
@@ -15,6 +19,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// handle confirmation dialog first
 	if m.confirm.active {
 		return m.updateConfirmDialog(msg)
+	}
+
+	// handle edit form
+	if m.editForm.active {
+		return m.updateEditMode(msg)
 	}
 
 	// handle search mode
@@ -147,6 +156,46 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 			m.filter.Priority = domain.Priority(item.value)
 		}
 
+	case "duedate":
+		// clear existing date filters first
+		m.filter.DueDateFrom = nil
+		m.filter.DueDateTo = nil
+
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+
+		switch item.value {
+		case "":
+			// All - no date filter
+		case "overdue":
+			// Tasks with due date before today
+			yesterday := today.AddDate(0, 0, -1).Format("2006-01-02")
+			m.filter.DueDateTo = &yesterday
+		case "today":
+			// Tasks due today
+			todayStr := today.Format("2006-01-02")
+			tomorrowStr := today.AddDate(0, 0, 1).Format("2006-01-02")
+			m.filter.DueDateFrom = &todayStr
+			m.filter.DueDateTo = &tomorrowStr
+		case "week":
+			// Tasks due within the next 7 days
+			todayStr := today.Format("2006-01-02")
+			weekStr := today.AddDate(0, 0, 7).Format("2006-01-02")
+			m.filter.DueDateFrom = &todayStr
+			m.filter.DueDateTo = &weekStr
+		case "month":
+			// Tasks due within the next 30 days
+			todayStr := today.Format("2006-01-02")
+			monthStr := today.AddDate(0, 0, 30).Format("2006-01-02")
+			m.filter.DueDateFrom = &todayStr
+			m.filter.DueDateTo = &monthStr
+		case "none":
+			// Tasks with no due date - this requires a different approach
+			// We'll use a special marker value
+			noneMarker := "none"
+			m.filter.DueDateFrom = &noneMarker
+		}
+
 	case "clear":
 		// clear all filters
 		m.filter.Status = ""
@@ -155,6 +204,8 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 		m.filter.Tags = []string{}
 		m.filter.SearchQuery = ""
 		m.filter.SearchMode = ""
+		m.filter.DueDateFrom = nil
+		m.filter.DueDateTo = nil
 
 	case "sort":
 		// handled separately via keybindings
@@ -344,17 +395,55 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	// Task creation and editing
+	case key.Matches(msg, m.keys.New):
+		return m.handleNewTask()
+
+	case key.Matches(msg, m.keys.Edit):
+		return m.handleEditTask()
+
+	// Multi-select
+	case key.Matches(msg, m.keys.ToggleMultiSelect):
+		return m.handleToggleMultiSelect()
+
+	case key.Matches(msg, m.keys.ToggleSelection):
+		if m.multiSelect.enabled {
+			return m.handleToggleSelection()
+		}
+
+	case key.Matches(msg, m.keys.SelectAll):
+		if m.multiSelect.enabled {
+			return m.handleSelectAll()
+		}
+
+	case key.Matches(msg, m.keys.DeselectAll):
+		if m.multiSelect.enabled {
+			return m.handleDeselectAll()
+		}
+
 	// Quick actions
 	case key.Matches(msg, m.keys.MarkComplete):
+		if m.multiSelect.enabled && len(m.multiSelect.selectedTasks) > 0 {
+			return m.handleBulkMarkComplete()
+		}
 		return m.handleMarkComplete()
 
 	case key.Matches(msg, m.keys.CyclePriority):
+		if m.multiSelect.enabled && len(m.multiSelect.selectedTasks) > 0 {
+			return m.handleBulkCyclePriority()
+		}
 		return m.handleCyclePriority()
 
 	case key.Matches(msg, m.keys.Delete):
+		if m.multiSelect.enabled && len(m.multiSelect.selectedTasks) > 0 {
+			return m.handleBulkDelete()
+		}
 		return m.handleDelete()
 
 	case key.Matches(msg, m.keys.ToggleStatus):
+		if m.multiSelect.enabled && len(m.multiSelect.selectedTasks) > 0 {
+			return m.handleBulkToggleStatus()
+		}
 		return m.handleToggleStatus()
 	}
 
@@ -485,7 +574,7 @@ func (m *Model) calculateTotalPages() int {
 func (m *Model) updateTableRows() {
 	rows := make([]table.Row, len(m.tasks))
 	for i, task := range m.tasks {
-		rows[i] = taskToRow(task)
+		rows[i] = m.taskToRow(task)
 	}
 	m.table.SetRows(rows)
 }
@@ -505,6 +594,14 @@ func (m *Model) buildFilterItems() []filterItem {
 		{label: "  ○ Medium", value: "medium", filterType: "priority"},
 		{label: "  ○ High", value: "high", filterType: "priority"},
 		{label: "  ○ Urgent", value: "urgent", filterType: "priority"},
+		{label: "", value: "", filterType: ""},
+		{label: "Filter by Due Date", value: "", filterType: "duedate"},
+		{label: "  ○ All", value: "", filterType: "duedate"},
+		{label: "  ○ Overdue", value: "overdue", filterType: "duedate"},
+		{label: "  ○ Due Today", value: "today", filterType: "duedate"},
+		{label: "  ○ Due This Week", value: "week", filterType: "duedate"},
+		{label: "  ○ Due This Month", value: "month", filterType: "duedate"},
+		{label: "  ○ No Due Date", value: "none", filterType: "duedate"},
 		{label: "", value: "", filterType: ""},
 		{label: "Clear All Filters", value: "", filterType: "clear"},
 	}
@@ -564,4 +661,425 @@ func (m *Model) navigateToNextTask() {
 
 	m.selectedTask = m.tasks[nextIndex]
 	m.table.SetCursor(nextIndex)
+}
+
+// Edit mode handler
+
+func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			// cancel edit
+			m.editForm.active = false
+			m.editForm.err = ""
+			m.viewMode = tableView
+			return m, nil
+
+		case "ctrl+s", "ctrl+enter":
+			// save task
+			return m.handleSaveTask()
+
+		case "tab":
+			// next field
+			m.editForm.focusedField++
+			if m.editForm.focusedField > 4 {
+				m.editForm.focusedField = 0
+			}
+			m.updateFormFocus()
+			return m, nil
+
+		case "shift+tab":
+			// previous field
+			m.editForm.focusedField--
+			if m.editForm.focusedField < 0 {
+				m.editForm.focusedField = 4
+			}
+			m.updateFormFocus()
+			return m, nil
+
+		case "ctrl+p":
+			// cycle priority
+			priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
+			m.editForm.priorityIdx = (m.editForm.priorityIdx + 1) % len(priorities)
+			return m, nil
+
+		case "ctrl+t":
+			// cycle status
+			statuses := []domain.Status{domain.StatusPending, domain.StatusInProgress, domain.StatusCompleted, domain.StatusCancelled}
+			m.editForm.statusIdx = (m.editForm.statusIdx + 1) % len(statuses)
+			return m, nil
+		}
+
+	case taskCreatedMsg:
+		m.message = "Task created successfully"
+		m.loading = false
+		m.editForm.active = false
+		m.editForm.err = ""
+		m.viewMode = tableView
+		return m, m.refreshCmd()
+
+	case taskUpdatedMsg:
+		m.message = "Task updated successfully"
+		m.loading = false
+		m.editForm.active = false
+		m.editForm.err = ""
+		m.viewMode = tableView
+		return m, m.refreshCmd()
+
+	case errMsg:
+		m.err = msg.err
+		m.editForm.err = msg.err.Error()
+		m.loading = false
+		return m, nil
+	}
+
+	// update focused field
+	var cmd tea.Cmd
+	switch m.editForm.focusedField {
+	case 0:
+		m.editForm.titleInput, cmd = m.editForm.titleInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 1:
+		m.editForm.descInput, cmd = m.editForm.descInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 2:
+		m.editForm.projectInput, cmd = m.editForm.projectInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 3:
+		m.editForm.tagsInput, cmd = m.editForm.tagsInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 4:
+		m.editForm.dueDateInput, cmd = m.editForm.dueDateInput.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+// New task and edit handlers
+
+func (m Model) handleNewTask() (tea.Model, tea.Cmd) {
+	m.initEditForm(nil)
+	m.editForm.active = true
+	m.editForm.isNewTask = true
+	m.viewMode = editView
+	return m, nil
+}
+
+func (m Model) handleEditTask() (tea.Model, tea.Cmd) {
+	task := m.getSelectedTask()
+	if task == nil {
+		return m, nil
+	}
+
+	m.initEditForm(task)
+	m.editForm.active = true
+	m.editForm.isNewTask = false
+	m.viewMode = editView
+	return m, nil
+}
+
+func (m *Model) initEditForm(task *domain.Task) {
+	// initialize text inputs
+	titleInput := textinput.New()
+	titleInput.Placeholder = "Task title"
+	titleInput.CharLimit = 200
+	titleInput.Width = 60
+
+	descInput := textarea.New()
+	descInput.Placeholder = "Task description (optional)"
+	descInput.CharLimit = 1000
+	descInput.SetWidth(60)
+	descInput.SetHeight(5)
+
+	projectInput := textinput.New()
+	projectInput.Placeholder = "Project (optional)"
+	projectInput.CharLimit = 100
+	projectInput.Width = 40
+
+	tagsInput := textinput.New()
+	tagsInput.Placeholder = "Tags (comma-separated, optional)"
+	tagsInput.CharLimit = 200
+	tagsInput.Width = 60
+
+	dueDateInput := textinput.New()
+	dueDateInput.Placeholder = "Due date (YYYY-MM-DD, optional)"
+	dueDateInput.CharLimit = 10
+	dueDateInput.Width = 20
+
+	m.editForm.titleInput = titleInput
+	m.editForm.descInput = descInput
+	m.editForm.projectInput = projectInput
+	m.editForm.tagsInput = tagsInput
+	m.editForm.dueDateInput = dueDateInput
+	m.editForm.focusedField = 0
+	m.editForm.err = ""
+
+	if task != nil {
+		// editing existing task
+		m.editForm.editingTask = task
+		m.editForm.titleInput.SetValue(task.Title)
+		m.editForm.descInput.SetValue(task.Description)
+		m.editForm.projectInput.SetValue(task.Project)
+		if len(task.Tags) > 0 {
+			m.editForm.tagsInput.SetValue(strings.Join(task.Tags, ", "))
+		}
+		if task.DueDate != nil {
+			m.editForm.dueDateInput.SetValue(task.DueDate.Format("2006-01-02"))
+		}
+
+		// set priority and status indices
+		priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
+		for i, p := range priorities {
+			if p == task.Priority {
+				m.editForm.priorityIdx = i
+				break
+			}
+		}
+
+		statuses := []domain.Status{domain.StatusPending, domain.StatusInProgress, domain.StatusCompleted, domain.StatusCancelled}
+		for i, s := range statuses {
+			if s == task.Status {
+				m.editForm.statusIdx = i
+				break
+			}
+		}
+	} else {
+		// new task
+		m.editForm.editingTask = nil
+		m.editForm.priorityIdx = 1 // default to medium
+		m.editForm.statusIdx = 0    // default to pending
+	}
+
+	m.editForm.titleInput.Focus()
+}
+
+func (m *Model) updateFormFocus() {
+	m.editForm.titleInput.Blur()
+	m.editForm.descInput.Blur()
+	m.editForm.projectInput.Blur()
+	m.editForm.tagsInput.Blur()
+	m.editForm.dueDateInput.Blur()
+
+	switch m.editForm.focusedField {
+	case 0:
+		m.editForm.titleInput.Focus()
+	case 1:
+		m.editForm.descInput.Focus()
+	case 2:
+		m.editForm.projectInput.Focus()
+	case 3:
+		m.editForm.tagsInput.Focus()
+	case 4:
+		m.editForm.dueDateInput.Focus()
+	}
+}
+
+func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
+	// build task from form
+	title := strings.TrimSpace(m.editForm.titleInput.Value())
+	if title == "" {
+		m.editForm.err = "Title is required"
+		return m, nil
+	}
+
+	description := strings.TrimSpace(m.editForm.descInput.Value())
+	project := strings.TrimSpace(m.editForm.projectInput.Value())
+
+	// parse tags
+	var tags []string
+	tagsStr := strings.TrimSpace(m.editForm.tagsInput.Value())
+	if tagsStr != "" {
+		for _, tag := range strings.Split(tagsStr, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				tags = append(tags, tag)
+			}
+		}
+	}
+
+	// parse due date
+	dueDateStr := strings.TrimSpace(m.editForm.dueDateInput.Value())
+
+	priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
+	statuses := []domain.Status{domain.StatusPending, domain.StatusInProgress, domain.StatusCompleted, domain.StatusCancelled}
+
+	if m.editForm.isNewTask {
+		// create new task
+		task := domain.NewTask(title)
+		task.Description = description
+		task.Project = project
+		task.Tags = tags
+		task.Priority = priorities[m.editForm.priorityIdx]
+		task.Status = statuses[m.editForm.statusIdx]
+
+		// parse due date if provided
+		if dueDateStr != "" {
+			// Simple date parsing (you can enhance this)
+			dueTime, err := domain.ParseDueDate(dueDateStr)
+			if err == nil {
+				task.DueDate = dueTime
+			}
+		}
+
+		m.loading = true
+		return m, createTaskCmd(m.ctx, m.repo, task)
+	} else {
+		// update existing task
+		task := m.editForm.editingTask
+		task.Title = title
+		task.Description = description
+		task.Project = project
+		task.Tags = tags
+		task.Priority = priorities[m.editForm.priorityIdx]
+		task.Status = statuses[m.editForm.statusIdx]
+
+		// parse due date if provided
+		if dueDateStr != "" {
+			dueTime, err := domain.ParseDueDate(dueDateStr)
+			if err == nil {
+				task.DueDate = dueTime
+			}
+		} else {
+			task.DueDate = nil
+		}
+
+		m.loading = true
+		return m, updateTaskCmd(m.ctx, m.repo, task)
+	}
+}
+
+// Multi-select handlers
+
+func (m Model) handleToggleMultiSelect() (tea.Model, tea.Cmd) {
+	m.multiSelect.enabled = !m.multiSelect.enabled
+	if !m.multiSelect.enabled {
+		// clear selections when disabling
+		m.multiSelect.selectedTasks = make(map[int64]bool)
+	}
+	return m, nil
+}
+
+func (m Model) handleToggleSelection() (tea.Model, tea.Cmd) {
+	task := m.getSelectedTask()
+	if task == nil {
+		return m, nil
+	}
+
+	if m.multiSelect.selectedTasks[task.ID] {
+		delete(m.multiSelect.selectedTasks, task.ID)
+	} else {
+		m.multiSelect.selectedTasks[task.ID] = true
+	}
+
+	return m, nil
+}
+
+func (m Model) handleSelectAll() (tea.Model, tea.Cmd) {
+	for _, task := range m.tasks {
+		m.multiSelect.selectedTasks[task.ID] = true
+	}
+	return m, nil
+}
+
+func (m Model) handleDeselectAll() (tea.Model, tea.Cmd) {
+	m.multiSelect.selectedTasks = make(map[int64]bool)
+	return m, nil
+}
+
+// Bulk operation handlers
+
+func (m Model) handleBulkMarkComplete() (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	for _, task := range m.tasks {
+		if m.multiSelect.selectedTasks[task.ID] {
+			// toggle between pending/completed
+			if task.Status == domain.StatusCompleted {
+				task.Status = domain.StatusPending
+			} else {
+				task.Status = domain.StatusCompleted
+			}
+			cmds = append(cmds, updateTaskCmd(m.ctx, m.repo, task))
+		}
+	}
+
+	m.multiSelect.selectedTasks = make(map[int64]bool)
+	m.loading = true
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleBulkCyclePriority() (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	for _, task := range m.tasks {
+		if m.multiSelect.selectedTasks[task.ID] {
+			// cycle priority
+			switch task.Priority {
+			case domain.PriorityLow:
+				task.Priority = domain.PriorityMedium
+			case domain.PriorityMedium:
+				task.Priority = domain.PriorityHigh
+			case domain.PriorityHigh:
+				task.Priority = domain.PriorityUrgent
+			case domain.PriorityUrgent:
+				task.Priority = domain.PriorityLow
+			default:
+				task.Priority = domain.PriorityMedium
+			}
+			cmds = append(cmds, updateTaskCmd(m.ctx, m.repo, task))
+		}
+	}
+
+	m.multiSelect.selectedTasks = make(map[int64]bool)
+	m.loading = true
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleBulkToggleStatus() (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	for _, task := range m.tasks {
+		if m.multiSelect.selectedTasks[task.ID] {
+			// toggle between pending/in_progress
+			if task.Status == domain.StatusPending {
+				task.Status = domain.StatusInProgress
+			} else if task.Status == domain.StatusInProgress {
+				task.Status = domain.StatusPending
+			} else {
+				task.Status = domain.StatusInProgress
+			}
+			cmds = append(cmds, updateTaskCmd(m.ctx, m.repo, task))
+		}
+	}
+
+	m.multiSelect.selectedTasks = make(map[int64]bool)
+	m.loading = true
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleBulkDelete() (tea.Model, tea.Cmd) {
+	count := len(m.multiSelect.selectedTasks)
+	if count == 0 {
+		return m, nil
+	}
+
+	// show confirmation dialog
+	m.confirm = confirmDialog{
+		message: fmt.Sprintf("Delete %d task(s)?", count),
+		active:  true,
+		onConfirm: func(model *Model) tea.Cmd {
+			var cmds []tea.Cmd
+			for taskID := range model.multiSelect.selectedTasks {
+				cmds = append(cmds, deleteTaskCmd(model.ctx, model.repo, taskID))
+			}
+			model.multiSelect.selectedTasks = make(map[int64]bool)
+			return tea.Batch(cmds...)
+		},
+	}
+
+	return m, nil
 }

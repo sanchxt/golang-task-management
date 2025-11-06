@@ -22,6 +22,11 @@ type taskUpdatedMsg struct {
 	task *domain.Task
 }
 
+// taskCreatedMsg is sent when a task is successfully created
+type taskCreatedMsg struct {
+	task *domain.Task
+}
+
 // taskDeletedMsg is sent when a task is successfully deleted
 type taskDeletedMsg struct {
 	taskID int64
@@ -61,6 +66,16 @@ func fetchTasksCmd(ctx context.Context, repo repository.TaskRepository, filter r
 			tasks:      tasks,
 			totalCount: totalCount,
 		}
+	}
+}
+
+// createTaskCmd creates a new task in the database
+func createTaskCmd(ctx context.Context, repo repository.TaskRepository, task *domain.Task) tea.Cmd {
+	return func() tea.Msg {
+		if err := repo.Create(ctx, task); err != nil {
+			return errMsg{err}
+		}
+		return taskCreatedMsg{task: task}
 	}
 }
 

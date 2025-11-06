@@ -44,7 +44,7 @@ func (dt *dbTask) toTask() (*domain.Task, error) {
 		UpdatedAt:   dt.UpdatedAt,
 	}
 
-	// parse tags JSON
+	// parse tags
 	if dt.Tags.Valid && dt.Tags.String != "" {
 		if err := json.Unmarshal([]byte(dt.Tags.String), &task.Tags); err != nil {
 			return nil, fmt.Errorf("failed to parse tags: %w", err)
@@ -53,12 +53,10 @@ func (dt *dbTask) toTask() (*domain.Task, error) {
 		task.Tags = make([]string, 0)
 	}
 
-	// handle nullable project
 	if dt.Project.Valid {
 		task.Project = dt.Project.String
 	}
 
-	// handle nullable due date
 	if dt.DueDate.Valid {
 		task.DueDate = &dt.DueDate.Time
 	}
@@ -72,7 +70,7 @@ func (r *TaskRepository) Create(ctx context.Context, task *domain.Task) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// serialize tags to JSON
+	// serialize tags
 	tagsJSON, err := json.Marshal(task.Tags)
 	if err != nil {
 		return fmt.Errorf("failed to marshal tags: %w", err)
@@ -215,7 +213,7 @@ func (r *TaskRepository) buildWhereClause(filter repository.TaskFilter, isCount 
 		args = append(args, filter.Project)
 	}
 
-	// tag filtering using JSON functions
+	// tag filtering
 	if len(filter.Tags) > 0 {
 		for _, tag := range filter.Tags {
 			query += " AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE value = ?)"
@@ -251,8 +249,12 @@ func (r *TaskRepository) buildWhereClause(filter repository.TaskFilter, isCount 
 
 	// date range filtering
 	if filter.DueDateFrom != nil {
-		query += " AND due_date >= ?"
-		args = append(args, *filter.DueDateFrom)
+		if *filter.DueDateFrom == "none" {
+			query += " AND due_date IS NULL"
+		} else {
+			query += " AND due_date >= ?"
+			args = append(args, *filter.DueDateFrom)
+		}
 	}
 	if filter.DueDateTo != nil {
 		query += " AND due_date <= ?"
@@ -322,7 +324,7 @@ func (r *TaskRepository) Update(ctx context.Context, task *domain.Task) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// serialize tags to JSON
+	// serialize tags
 	tagsJSON, err := json.Marshal(task.Tags)
 	if err != nil {
 		return fmt.Errorf("failed to marshal tags: %w", err)

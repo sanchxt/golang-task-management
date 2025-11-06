@@ -3,8 +3,11 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"task-management/internal/domain"
 )
 
 // renders the UI
@@ -25,6 +28,14 @@ func (m Model) View() string {
 		b.WriteString("\n")
 		b.WriteString(m.renderConfirmDialog())
 		b.WriteString("\n")
+		return b.String()
+	}
+
+	// edit form
+	if m.editForm.active {
+		b.WriteString(m.renderEditForm())
+		b.WriteString("\n")
+		b.WriteString(m.renderEditHelp())
 		return b.String()
 	}
 
@@ -54,6 +65,8 @@ func (m Model) View() string {
 		b.WriteString(m.renderTableView())
 	case detailView:
 		b.WriteString(m.renderDetailView())
+	case editView:
+		b.WriteString(m.renderEditForm())
 	}
 
 	b.WriteString("\n")
@@ -206,6 +219,9 @@ func (m Model) renderFilterPanel() string {
 			isActive = true
 		} else if item.filterType == "priority" && item.value == string(m.filter.Priority) {
 			isActive = true
+		} else if item.filterType == "duedate" {
+			// check date filter match
+			isActive = m.isDateFilterActive(item.value)
 		}
 
 		// highlight selected item
@@ -226,6 +242,46 @@ func (m Model) renderFilterPanel() string {
 	}
 
 	return b.String()
+}
+
+// checks if a date filter is currently active
+func (m Model) isDateFilterActive(value string) bool {
+	// no date filter
+	if m.filter.DueDateFrom == nil && m.filter.DueDateTo == nil {
+		return value == ""
+	}
+
+	// special case: no due date filter
+	if m.filter.DueDateFrom != nil && *m.filter.DueDateFrom == "none" {
+		return value == "none"
+	}
+
+	// calculate expected date ranges for each filter type
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+
+	switch value {
+	case "overdue":
+		yesterday := today.AddDate(0, 0, -1).Format("2006-01-02")
+		return m.filter.DueDateFrom == nil && m.filter.DueDateTo != nil && *m.filter.DueDateTo == yesterday
+	case "today":
+		todayStr := today.Format("2006-01-02")
+		tomorrowStr := today.AddDate(0, 0, 1).Format("2006-01-02")
+		return m.filter.DueDateFrom != nil && *m.filter.DueDateFrom == todayStr &&
+			m.filter.DueDateTo != nil && *m.filter.DueDateTo == tomorrowStr
+	case "week":
+		todayStr := today.Format("2006-01-02")
+		weekStr := today.AddDate(0, 0, 7).Format("2006-01-02")
+		return m.filter.DueDateFrom != nil && *m.filter.DueDateFrom == todayStr &&
+			m.filter.DueDateTo != nil && *m.filter.DueDateTo == weekStr
+	case "month":
+		todayStr := today.Format("2006-01-02")
+		monthStr := today.AddDate(0, 0, 30).Format("2006-01-02")
+		return m.filter.DueDateFrom != nil && *m.filter.DueDateFrom == todayStr &&
+			m.filter.DueDateTo != nil && *m.filter.DueDateTo == monthStr
+	}
+
+	return false
 }
 
 // renders confirmation dialog
@@ -257,6 +313,13 @@ func (m Model) renderConfirmDialog() string {
 // renders status bar
 func (m Model) renderStatusBar() string {
 	var items []string
+
+	// multi-select mode indicator
+	if m.multiSelect.enabled {
+		selectedCount := len(m.multiSelect.selectedTasks)
+		multiInfo := m.styles.Success.Render(fmt.Sprintf("✓ Multi-select: %d selected", selectedCount))
+		items = append(items, multiInfo)
+	}
 
 	// total and page info
 	if m.totalCount > 0 {
@@ -352,6 +415,8 @@ func (m Model) renderFullHelp() string {
 			"  ↑/k         Move up",
 			"  ↓/j         Move down",
 			"  Enter       View details",
+			"  n           New task",
+			"  e           Edit task",
 			"  f           Open filters",
 			"  F           Clear filters",
 			"  /           Search",
@@ -366,6 +431,12 @@ func (m Model) renderFullHelp() string {
 			"  x           Toggle status",
 			"  d           Delete task",
 			"",
+			"Multi-select:",
+			"  v           Toggle multi-select mode",
+			"  Space       Toggle selection",
+			"  Ctrl+A      Select all",
+			"  Ctrl+D      Deselect all",
+			"",
 			"General:",
 			"  q/Ctrl+C    Quit",
 			"  ?           Toggle help",
@@ -376,6 +447,7 @@ func (m Model) renderFullHelp() string {
 			"  ↑/k         Previous task",
 			"  ↓/j         Next task",
 			"  Esc         Back to list",
+			"  e           Edit task",
 			"",
 			"Quick Actions:",
 			"  c           Mark complete",
@@ -401,26 +473,32 @@ func (m Model) renderQuickHelp() string {
 	} else if m.uiMode == filteringMode {
 		hints = []string{"↑/↓: navigate", "Enter: select", "Esc: cancel", "?: help"}
 	} else if m.viewMode == tableView {
-		hints = []string{
-			"↑/↓: navigate",
-			"Enter: view",
-			"f: filter",
-			"/: search",
-			"s: sort",
-			"c: complete",
-			"p: priority",
-			"d: delete",
-			"q: quit",
-			"?: help",
+		if m.multiSelect.enabled {
+			hints = []string{
+				"Space: toggle",
+				fmt.Sprintf("Selected: %d", len(m.multiSelect.selectedTasks)),
+				"v: exit multi-select",
+				"c/p/x/d: bulk ops",
+				"?: help",
+			}
+		} else {
+			hints = []string{
+				"↑/↓: navigate",
+				"n: new",
+				"e: edit",
+				"v: multi-select",
+				"f: filter",
+				"/: search",
+				"c/p/x/d: actions",
+				"?: help",
+			}
 		}
 	} else {
 		hints = []string{
 			"↑/↓: prev/next",
+			"e: edit",
 			"Esc: back",
-			"c: complete",
-			"p: priority",
-			"d: delete",
-			"q: quit",
+			"c/p/x/d: actions",
 			"?: help",
 		}
 	}
@@ -461,4 +539,119 @@ func (m *Model) countActiveFilters() int {
 		count++
 	}
 	return count
+}
+
+// Edit form rendering
+
+func (m Model) renderEditForm() string {
+	var b strings.Builder
+
+	// title
+	formTitle := "Edit Task"
+	if m.editForm.isNewTask {
+		formTitle = "New Task"
+	}
+	b.WriteString(m.styles.TUISubtitle.Render(formTitle))
+	b.WriteString("\n\n")
+
+	// error message
+	if m.editForm.err != "" {
+		b.WriteString(m.styles.Error.Render("Error: " + m.editForm.err))
+		b.WriteString("\n\n")
+	}
+
+	// form fields
+	priorities := []string{"low", "medium", "high", "urgent"}
+	statuses := []string{"pending", "in_progress", "completed", "cancelled"}
+
+	// Title field
+	fieldLabel := "Title:"
+	if m.editForm.focusedField == 0 {
+		fieldLabel = m.styles.Success.Render("▶ " + fieldLabel)
+	} else {
+		fieldLabel = "  " + fieldLabel
+	}
+	b.WriteString(m.styles.DetailLabel.Render(fieldLabel))
+	b.WriteString("\n  ")
+	b.WriteString(m.editForm.titleInput.View())
+	b.WriteString("\n\n")
+
+	// Description field
+	fieldLabel = "Description:"
+	if m.editForm.focusedField == 1 {
+		fieldLabel = m.styles.Success.Render("▶ " + fieldLabel)
+	} else {
+		fieldLabel = "  " + fieldLabel
+	}
+	b.WriteString(m.styles.DetailLabel.Render(fieldLabel))
+	b.WriteString("\n  ")
+	b.WriteString(m.editForm.descInput.View())
+	b.WriteString("\n\n")
+
+	// Project field
+	fieldLabel = "Project:"
+	if m.editForm.focusedField == 2 {
+		fieldLabel = m.styles.Success.Render("▶ " + fieldLabel)
+	} else {
+		fieldLabel = "  " + fieldLabel
+	}
+	b.WriteString(m.styles.DetailLabel.Render(fieldLabel))
+	b.WriteString("\n  ")
+	b.WriteString(m.editForm.projectInput.View())
+	b.WriteString("\n\n")
+
+	// Tags field
+	fieldLabel = "Tags:"
+	if m.editForm.focusedField == 3 {
+		fieldLabel = m.styles.Success.Render("▶ " + fieldLabel)
+	} else {
+		fieldLabel = "  " + fieldLabel
+	}
+	b.WriteString(m.styles.DetailLabel.Render(fieldLabel))
+	b.WriteString("\n  ")
+	b.WriteString(m.editForm.tagsInput.View())
+	b.WriteString("\n\n")
+
+	// Due Date field
+	fieldLabel = "Due Date:"
+	if m.editForm.focusedField == 4 {
+		fieldLabel = m.styles.Success.Render("▶ " + fieldLabel)
+	} else {
+		fieldLabel = "  " + fieldLabel
+	}
+	b.WriteString(m.styles.DetailLabel.Render(fieldLabel))
+	b.WriteString("\n  ")
+	b.WriteString(m.editForm.dueDateInput.View())
+	b.WriteString("\n\n")
+
+	// Priority field (selector)
+	b.WriteString(m.styles.DetailLabel.Render("  Priority:"))
+	b.WriteString(" ")
+	priorityValue := domain.Priority(priorities[m.editForm.priorityIdx])
+	priorityStyle := m.styles.GetPriorityTextStyle(priorityValue)
+	b.WriteString(priorityStyle.Render(priorities[m.editForm.priorityIdx]))
+	b.WriteString(m.styles.TUIHelp.Render(" (Ctrl+P to cycle)"))
+	b.WriteString("\n\n")
+
+	// Status field (selector)
+	b.WriteString(m.styles.DetailLabel.Render("  Status:"))
+	b.WriteString(" ")
+	statusValue := domain.Status(statuses[m.editForm.statusIdx])
+	statusStyle := m.styles.GetStatusStyle(statusValue)
+	b.WriteString(statusStyle.Render(statuses[m.editForm.statusIdx]))
+	b.WriteString(m.styles.TUIHelp.Render(" (Ctrl+T to cycle)"))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+func (m Model) renderEditHelp() string {
+	hints := []string{
+		"Tab/Shift+Tab: navigate fields",
+		"Ctrl+S: save",
+		"Ctrl+P: cycle priority",
+		"Ctrl+T: cycle status",
+		"Esc: cancel",
+	}
+	return m.styles.TUIHelp.Render(strings.Join(hints, "  •  "))
 }

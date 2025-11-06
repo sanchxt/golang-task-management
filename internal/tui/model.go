@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,7 @@ const (
 	filterView
 	searchView
 	confirmView
+	editView
 )
 
 // UI mode for different interactions
@@ -69,6 +71,12 @@ type Model struct {
 	// filter panel state
 	filterPanel  filterPanel
 
+	// edit form state
+	editForm     editForm
+
+	// multi-select state
+	multiSelect  multiSelectState
+
 	// confirmation dialog
 	confirm      confirmDialog
 
@@ -103,6 +111,28 @@ type filterItem struct {
 	label       string
 	value       string
 	filterType  string // "status", "priority", "project", "tags", "clear"
+}
+
+// edit form for creating/updating tasks
+type editForm struct {
+	active         bool
+	isNewTask      bool
+	editingTask    *domain.Task
+	titleInput     textinput.Model
+	descInput      textarea.Model
+	projectInput   textinput.Model
+	tagsInput      textinput.Model
+	dueDateInput   textinput.Model
+	focusedField   int
+	priorityIdx    int     // index for cycling priority
+	statusIdx      int     // index for cycling status
+	err            string
+}
+
+// multi-select state
+type multiSelectState struct {
+	enabled       bool
+	selectedTasks map[int64]bool
 }
 
 // creates a new TUI model
@@ -168,6 +198,10 @@ func NewModel(repo repository.TaskRepository, initialFilter repository.TaskFilte
 		keys:        defaultKeyMap(),
 		viewMode:    tableView,
 		uiMode:      normalMode,
+		multiSelect: multiSelectState{
+			enabled:       false,
+			selectedTasks: make(map[int64]bool),
+		},
 		theme:       themeObj,
 		styles:      styles,
 		ctx:         context.Background(),
@@ -180,10 +214,20 @@ func (m Model) Init() tea.Cmd {
 }
 
 // convert task -> table row
-func taskToRow(task *domain.Task) table.Row {
+func (m *Model) taskToRow(task *domain.Task) table.Row {
+	// checkbox for multi-select
+	checkbox := "  "
+	if m.multiSelect.enabled {
+		if m.multiSelect.selectedTasks[task.ID] {
+			checkbox = "☑ "
+		} else {
+			checkbox = "☐ "
+		}
+	}
+
 	// status
 	statusIcon := display.GetStatusIcon(task.Status)
-	status := fmt.Sprintf("%s %s", statusIcon, task.Status)
+	status := fmt.Sprintf("%s%s %s", checkbox, statusIcon, task.Status)
 
 	// priority
 	priorityIcon := display.GetPriorityIcon(task.Priority)

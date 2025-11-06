@@ -24,11 +24,19 @@ type keyMap struct {
 	PrevPage key.Binding
 
 	// actions
+	New           key.Binding
+	Edit          key.Binding
 	MarkComplete  key.Binding
 	CyclePriority key.Binding
 	ToggleStatus  key.Binding
 	Delete        key.Binding
 	Refresh       key.Binding
+
+	// multi-select
+	ToggleMultiSelect key.Binding
+	ToggleSelection   key.Binding
+	SelectAll         key.Binding
+	DeselectAll       key.Binding
 
 	// general
 	Quit key.Binding
@@ -91,6 +99,14 @@ func defaultKeyMap() keyMap {
 		),
 
 		// actions
+		New: key.NewBinding(
+			key.WithKeys("n"),
+			key.WithHelp("n", "new task"),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "edit task"),
+		),
 		MarkComplete: key.NewBinding(
 			key.WithKeys("c"),
 			key.WithHelp("c", "mark complete"),
@@ -112,6 +128,24 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("r", "refresh"),
 		),
 
+		// multi-select
+		ToggleMultiSelect: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "multi-select mode"),
+		),
+		ToggleSelection: key.NewBinding(
+			key.WithKeys(" "),
+			key.WithHelp("space", "toggle selection"),
+		),
+		SelectAll: key.NewBinding(
+			key.WithKeys("ctrl+a"),
+			key.WithHelp("ctrl+a", "select all"),
+		),
+		DeselectAll: key.NewBinding(
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "deselect all"),
+		),
+
 		// general
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
@@ -125,15 +159,17 @@ func defaultKeyMap() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Enter, k.Filter, k.Search, k.Quit, k.Help}
+	return []key.Binding{k.Up, k.Down, k.Enter, k.New, k.Edit, k.Quit, k.Help}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter, k.Back},
+		{k.New, k.Edit, k.Delete, k.Refresh},
+		{k.MarkComplete, k.CyclePriority, k.ToggleStatus},
 		{k.Filter, k.ClearFilters, k.Search},
 		{k.Sort, k.SortOrder, k.NextPage, k.PrevPage},
-		{k.MarkComplete, k.CyclePriority, k.ToggleStatus, k.Delete},
-		{k.Refresh, k.Quit, k.Help},
+		{k.ToggleMultiSelect, k.ToggleSelection, k.SelectAll, k.DeselectAll},
+		{k.Quit, k.Help},
 	}
 }

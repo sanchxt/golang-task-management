@@ -94,3 +94,21 @@ func isValidStatus(s Status) bool {
 		return false
 	}
 }
+
+// parses a date string in various formats
+func ParseDueDate(dateStr string) (*time.Time, error) {
+	formats := []string{
+		"2006-01-02",
+		"2006/01/02",
+		"02-01-2006",
+		"02/01/2006",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, dateStr); err == nil {
+			return &t, nil
+		}
+	}
+
+	return nil, errors.New("unable to parse date: " + dateStr)
+}
