@@ -1,38 +1,36 @@
-# Binaries for programs and plugins
+# binaries
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary, built with `go test -c`
 *.test
 
-# Output of the go coverage tool
 *.out
 
-# Go workspace file
+# go workspace file
 go.work
 
-# Compiled binary
-taskflow
+# taskflow
 
-# Database files
+# db files
 *.db
 *.db-shm
 *.db-wal
 
-# IDE and editor files
+# IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+
 # OS files
 .DS_Store
 Thumbs.db
 
-# Temporary files
+# temp files
 tmp/
 temp/
