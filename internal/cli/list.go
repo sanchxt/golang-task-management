@@ -11,6 +11,7 @@ import (
 	"task-management/internal/config"
 	"task-management/internal/display"
 	"task-management/internal/domain"
+	"task-management/internal/query"
 	"task-management/internal/repository"
 	"task-management/internal/repository/sqlite"
 	"task-management/internal/theme"
@@ -18,23 +19,28 @@ import (
 )
 
 var (
-	// list command flags
+	// list command
 	listStatus   string
 	listPriority string
 	listProject  string
 	listTags     []string
 	listCLI      bool
 
-	// pagination flags
+	// pagination
 	listPage     int
 	listPageSize int
 	listAll      bool
 
-	// search flags
-	listSearch    string
-	listRegex     bool
-	listSortBy    string
-	listSortOrder string
+	// search
+	listSearch         string
+	listRegex          bool
+	listFuzzy          bool
+	listFuzzyThreshold int
+	listSortBy         string
+	listSortOrder      string
+
+	// query language
+	listQuery string
 )
 
 var listCmd = &cobra.Command{
@@ -69,32 +75,50 @@ Examples:
   taskflow list --priority high --project backend  # TUI with filters
   taskflow list --tags bug,urgent                  # TUI with tags
   taskflow list --cli                              # Text table mode
-  taskflow list --cli --status pending             # Text table with filter`,
+  taskflow list --cli --status pending             # Text table with filter
+
+  # Query language examples (use 'taskflow query help' for full syntax reference):
+  taskflow list --query "status:pending priority:high"      # Combine status + priority
+  taskflow list --query "@backend tag:bug -tag:wontfix"     # Project + include/exclude tags
+  taskflow list --query "due:+7d priority:urgent"           # Due in next 7 days, urgent
+  taskflow list --query "due:-3d status:pending"            # Overdue by 3 days, pending
+  taskflow list --query "@~front status:pending"            # Fuzzy project match + status
+  taskflow list --query "-status:completed -status:cancelled" # Multiple exclusions
+
+  # Fuzzy search examples:
+  taskflow list --search back --fuzzy              # Fuzzy search for "back" (finds backend, backup, etc.)
+  taskflow list --search api --fuzzy --fuzzy-threshold 70  # Higher threshold for stricter matching
+  taskflow list --cli --search bcknd --fuzzy       # Typo-tolerant search in CLI mode`,
 	RunE: runList,
 }
 
 func init() {
 	rootCmd.AddCommand(listCmd)
 
-	// display flags
+	// display
 	listCmd.Flags().BoolVar(&listCLI, "cli", false, "Display as text table instead of TUI")
 
-	// filter flags
+	// filter
 	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (pending, in_progress, completed, cancelled)")
 	listCmd.Flags().StringVarP(&listPriority, "priority", "p", "", "Filter by priority (low, medium, high, urgent)")
-	listCmd.Flags().StringVarP(&listProject, "project", "P", "", "Filter by project")
+	listCmd.Flags().StringVarP(&listProject, "project", "P", "", "Filter by project (name or ID)")
 	listCmd.Flags().StringSliceVarP(&listTags, "tags", "t", []string{}, "Filter by tags (comma-separated)")
 
-	// pagination flags
+	// pagination
 	listCmd.Flags().IntVar(&listPage, "page", 1, "Page number (starts at 1)")
 	listCmd.Flags().IntVar(&listPageSize, "page-size", 0, "Number of tasks per page (0 = use config default)")
 	listCmd.Flags().BoolVar(&listAll, "all", false, "Show all tasks (disable pagination)")
 
-	// search flags
+	// search
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search query (searches in title, description, project, tags)")
 	listCmd.Flags().BoolVar(&listRegex, "regex", false, "Use regex mode for search")
+	listCmd.Flags().BoolVar(&listFuzzy, "fuzzy", false, "Use fuzzy search mode (typo-tolerant, abbreviation-friendly)")
+	listCmd.Flags().IntVar(&listFuzzyThreshold, "fuzzy-threshold", 60, "Minimum fuzzy match score (0-100, default 60)")
 	listCmd.Flags().StringVar(&listSortBy, "sort-by", "created_at", "Sort by field (created_at, updated_at, priority, due_date, title)")
 	listCmd.Flags().StringVar(&listSortOrder, "sort-order", "desc", "Sort order (asc, desc)")
+
+	// query language
+	listCmd.Flags().StringVarP(&listQuery, "query", "q", "", "Query language filter (e.g., 'status:pending @backend tag:bug')")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -121,9 +145,11 @@ func runList(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	repo := sqlite.NewTaskRepository(db)
+	projectRepo := sqlite.NewProjectRepository(db)
+	viewRepo := sqlite.NewViewRepository(db)
+	searchHistoryRepo := sqlite.NewSearchHistoryRepository(db)
 	ctx := context.Background()
 
-	// determine page size
 	pageSize := listPageSize
 	if pageSize == 0 {
 		pageSize = cfg.DefaultPageSize
@@ -132,19 +158,91 @@ func runList(cmd *cobra.Command, args []string) error {
 		pageSize = cfg.MaxPageSize
 	}
 
-	// build filter
+	if listQuery != "" {
+		return runListWithQueryLanguage(ctx, repo, projectRepo, viewRepo, searchHistoryRepo, cfg, themeObj, styles, pageSize)
+	}
+
+	var parsedQuery *query.ProjectMentionQuery
+	if listSearch != "" {
+		var err error
+		parsedQuery, err = query.ParseProjectMentions(listSearch)
+		if err != nil {
+			if listCLI {
+				fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to parse query: %v", err)))
+				return nil
+			}
+			return fmt.Errorf("failed to parse query: %w", err)
+		}
+	}
+
+	var projectID *int64
+	var projectSource string
+
+	if parsedQuery != nil && parsedQuery.HasProjectFilter() {
+		mention := parsedQuery.ProjectMentions[0]
+
+		if mention.Fuzzy {
+			fuzzyThreshold := 60
+			var err error
+			projectID, err = lookupProjectByFuzzyName(ctx, projectRepo, mention.Name, fuzzyThreshold)
+			if err != nil {
+				if listCLI {
+					fmt.Println(styles.Error.Render(fmt.Sprintf("✗ %v", err)))
+					return nil
+				}
+				return fmt.Errorf("%v", err)
+			}
+			projectSource = "@~" + mention.Name
+		} else {
+			var err error
+			projectID, err = lookupProjectID(ctx, projectRepo, mention.Name)
+			if err != nil {
+				if listCLI {
+					fmt.Println(styles.Error.Render(fmt.Sprintf("✗ %v", err)))
+					return nil
+				}
+				return fmt.Errorf("%v", err)
+			}
+			projectSource = "@" + mention.Name
+		}
+
+		listSearch = parsedQuery.BaseQuery
+	} else if listProject != "" {
+		var err error
+		projectID, err = lookupProjectID(ctx, projectRepo, listProject)
+		if err != nil {
+			if listCLI {
+				fmt.Println(styles.Error.Render(fmt.Sprintf("✗ %v", err)))
+				return nil
+			}
+			return fmt.Errorf("%v", err)
+		}
+		projectSource = "--project=" + listProject
+	}
+
+	_ = projectSource
+
 	filter := repository.TaskFilter{
 		Status:      domain.Status(listStatus),
 		Priority:    domain.Priority(listPriority),
-		Project:     listProject,
+		ProjectID:   projectID,
 		Tags:        listTags,
 		SearchQuery: listSearch,
 		SortBy:      listSortBy,
 		SortOrder:   listSortOrder,
 	}
 
-	// search mode
-	if listRegex {
+	if listFuzzy && listSearch != "" {
+		filter.SearchMode = "fuzzy"
+		filter.FuzzyThreshold = listFuzzyThreshold
+		if filter.FuzzyThreshold < 0 || filter.FuzzyThreshold > 100 {
+			if listCLI {
+				fmt.Println(styles.Error.Render("✗ Fuzzy threshold must be between 0 and 100"))
+				return nil
+			}
+			return fmt.Errorf("fuzzy threshold must be between 0 and 100")
+		}
+	} else if listRegex {
 		filter.SearchMode = "regex"
 	} else if listSearch != "" {
 		filter.SearchMode = "text"
@@ -158,7 +256,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		filter.Offset = (listPage - 1) * pageSize
 	}
 
-	// total count for pagination info
 	totalCount, err := repo.Count(ctx, filter)
 	if err != nil {
 		if listCLI {
@@ -168,7 +265,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to count tasks: %w", err)
 	}
 
-	// fetch tasks
 	tasks, err := repo.List(ctx, filter)
 	if err != nil {
 		if listCLI {
@@ -178,7 +274,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list tasks: %w", err)
 	}
 
-	// handle empty tasks
 	if len(tasks) == 0 && listCLI {
 		fmt.Println()
 		if hasActiveFilters(filter) {
@@ -191,7 +286,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// mode to use
 	if listCLI {
 		totalPages := int((totalCount + int64(pageSize) - 1) / int64(pageSize))
 		if listAll {
@@ -201,7 +295,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 		displayTasksTable(tasks, styles, filter, listPage, totalPages, totalCount)
 	} else {
-		model := tui.NewModel(repo, filter, pageSize, themeObj, styles)
+		model := tui.NewModel(repo, projectRepo, viewRepo, searchHistoryRepo, filter, pageSize, themeObj, styles)
 		p := tea.NewProgram(model, tea.WithAltScreen())
 
 		if _, err := p.Run(); err != nil {
@@ -212,16 +306,107 @@ func runList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// checks if any filters are active
+// handles --query flag using the query language parser
+func runListWithQueryLanguage(
+	ctx context.Context,
+	repo repository.TaskRepository,
+	projectRepo repository.ProjectRepository,
+	viewRepo repository.ViewRepository,
+	searchHistoryRepo repository.SearchHistoryRepository,
+	cfg *config.Config,
+	themeObj *theme.Theme,
+	styles *theme.Styles,
+	pageSize int,
+) error {
+	parsed, err := query.ParseQuery(listQuery)
+	if err != nil {
+		if listCLI {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Query parse error: %v", err)))
+			return nil
+		}
+		return fmt.Errorf("query parse error: %w", err)
+	}
+
+	converterCtx := &query.ConverterContext{
+		ProjectRepo: projectRepo,
+	}
+
+	filter, err := query.ConvertToTaskFilter(ctx, parsed, converterCtx)
+	if err != nil {
+		if listCLI {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Query conversion error: %v", err)))
+			return nil
+		}
+		return fmt.Errorf("query conversion error: %w", err)
+	}
+
+	filter.SortBy = listSortBy
+	filter.SortOrder = listSortOrder
+
+	if !listAll && listCLI {
+		if listPage < 1 {
+			listPage = 1
+		}
+		filter.Limit = pageSize
+		filter.Offset = (listPage - 1) * pageSize
+	}
+
+	totalCount, err := repo.Count(ctx, filter)
+	if err != nil {
+		if listCLI {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to count tasks: %v", err)))
+			return nil
+		}
+		return fmt.Errorf("failed to count tasks: %w", err)
+	}
+
+	tasks, err := repo.List(ctx, filter)
+	if err != nil {
+		if listCLI {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to list tasks: %v", err)))
+			return nil
+		}
+		return fmt.Errorf("failed to list tasks: %w", err)
+	}
+
+	if len(tasks) == 0 && listCLI {
+		fmt.Println()
+		fmt.Println(styles.Info.Render("No tasks found matching the query."))
+		fmt.Println(styles.Subtitle.Render(fmt.Sprintf("Query: %s", listQuery)))
+		fmt.Println()
+		return nil
+	}
+
+	if listCLI {
+		totalPages := int((totalCount + int64(pageSize) - 1) / int64(pageSize))
+		if listAll {
+			listPage = 1
+			totalPages = 1
+		}
+
+		fmt.Println()
+		fmt.Println(styles.Subtitle.Render(fmt.Sprintf("Query: %s", listQuery)))
+		displayTasksTable(tasks, styles, filter, listPage, totalPages, totalCount)
+	} else {
+		model := tui.NewModel(repo, projectRepo, viewRepo, searchHistoryRepo, filter, pageSize, themeObj, styles)
+		p := tea.NewProgram(model, tea.WithAltScreen())
+
+		if _, err := p.Run(); err != nil {
+			return fmt.Errorf("error running TUI: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func hasActiveFilters(filter repository.TaskFilter) bool {
 	return filter.Status != "" ||
 		filter.Priority != "" ||
-		filter.Project != "" ||
+		filter.ProjectID != nil ||
 		len(filter.Tags) > 0 ||
 		filter.SearchQuery != ""
 }
 
-// displays active filters summary
 func displayActiveFilters(filter repository.TaskFilter, styles *theme.Styles) {
 	fmt.Println()
 	fmt.Println(styles.Subtitle.Render("Active filters:"))
@@ -232,8 +417,8 @@ func displayActiveFilters(filter repository.TaskFilter, styles *theme.Styles) {
 	if filter.Priority != "" {
 		fmt.Printf("  Priority: %s\n", filter.Priority)
 	}
-	if filter.Project != "" {
-		fmt.Printf("  Project: %s\n", filter.Project)
+	if filter.ProjectID != nil {
+		fmt.Printf("  Project ID: %d\n", *filter.ProjectID)
 	}
 	if len(filter.Tags) > 0 {
 		fmt.Printf("  Tags: %s\n", strings.Join(filter.Tags, ", "))
@@ -242,6 +427,8 @@ func displayActiveFilters(filter repository.TaskFilter, styles *theme.Styles) {
 		mode := "text"
 		if filter.SearchMode == "regex" {
 			mode = "regex"
+		} else if filter.SearchMode == "fuzzy" {
+			mode = fmt.Sprintf("fuzzy, threshold=%d", filter.FuzzyThreshold)
 		}
 		fmt.Printf("  Search (%s): %s\n", mode, filter.SearchQuery)
 	}
@@ -277,7 +464,6 @@ func displayTasksTable(tasks []*domain.Task, styles *theme.Styles, filter reposi
 
 	fmt.Println()
 
-	// pagination info
 	if filter.Limit > 0 {
 		startIdx := filter.Offset + 1
 		endIdx := filter.Offset + len(tasks)
@@ -309,14 +495,14 @@ func printTaskRow(task *domain.Task, styles *theme.Styles) {
 	priorityIcon := display.GetPriorityIcon(task.Priority)
 	priority := fmt.Sprintf("%s %s", priorityIcon, task.Priority)
 
-	// truncate title if too long
+	// truncate title
 	title := task.Title
 	if len(title) > 40 {
 		title = title[:37] + "..."
 	}
 
 	// format project
-	project := task.Project
+	project := task.ProjectName
 	if project == "" {
 		project = "-"
 	}

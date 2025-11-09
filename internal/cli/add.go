@@ -30,8 +30,9 @@ var addCmd = &cobra.Command{
 
 Examples:
   taskflow add "Implement user authentication"
-  taskflow add "Fix login bug" --priority high --project backend
-  taskflow add "Write documentation" --tags docs,important --due-date "2024-12-31"`,
+  taskflow add "Fix login bug" --priority high --project Backend
+  taskflow add "Write documentation" --tags docs,important --due-date "2024-12-31"
+  taskflow add "Database optimization" --project 1 --priority high`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runAdd,
 }
@@ -42,7 +43,7 @@ func init() {
 	// flags
 	addCmd.Flags().StringVarP(&addPriority, "priority", "p", "medium", "Task priority (low, medium, high, urgent)")
 	addCmd.Flags().StringVarP(&addDescription, "description", "d", "", "Description of your task")
-	addCmd.Flags().StringVarP(&addProject, "project", "P", "", "Project name")
+	addCmd.Flags().StringVarP(&addProject, "project", "P", "", "Project name or ID")
 	addCmd.Flags().StringSliceVarP(&addTags, "tags", "t", []string{}, "Comma-separated tags")
 	addCmd.Flags().StringVar(&addDueDate, "due-date", "", "Due date (YYYY-MM-DD format)")
 }
@@ -67,7 +68,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load theme: %w", err)
 	}
 
-	// create styles from theme
 	styles := theme.NewStyles(themeObj)
 
 	// initialize db
@@ -78,12 +78,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	repo := sqlite.NewTaskRepository(db)
+	ctx := context.Background()
 
 	task := domain.NewTask(title)
 	task.Description = addDescription
 	task.Priority = domain.Priority(addPriority)
-	task.Project = addProject
 	task.Tags = addTags
+
+	// lookup project
+	if addProject != "" {
+		projectRepo := sqlite.NewProjectRepository(db)
+		projectID, err := lookupProjectID(ctx, projectRepo, addProject)
+		if err != nil {
+			fmt.Println(styles.Error.Render(fmt.Sprintf("✗ %v", err)))
+			return nil
+		}
+		task.ProjectID = projectID
+	}
 
 	// parse due date
 	if addDueDate != "" {
@@ -96,8 +107,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		task.DueDate = dueDate
 	}
 
-	// save to db
-	ctx := context.Background()
 	if err := repo.Create(ctx, task); err != nil {
 		fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to create task: %v", err)))
 		return nil
@@ -141,8 +150,8 @@ func displayTaskCreated(task *domain.Task, styles *theme.Styles) {
 	fmt.Printf("  %s %s\n", styles.Info.Render("Priority:"), task.Priority)
 	fmt.Printf("  %s %s\n", styles.Info.Render("Status:"), task.Status)
 
-	if task.Project != "" {
-		fmt.Printf("  %s %s\n", styles.Info.Render("Project:"), task.Project)
+	if task.ProjectName != "" {
+		fmt.Printf("  %s %s\n", styles.Info.Render("Project:"), task.ProjectName)
 	}
 
 	if len(task.Tags) > 0 {

@@ -9,10 +9,12 @@ import (
 )
 
 type Config struct {
-	DBPath          string `mapstructure:"db_path"`
-	ThemeName       string `mapstructure:"theme_name"`
-	DefaultPageSize int    `mapstructure:"default_page_size"`
-	MaxPageSize     int    `mapstructure:"max_page_size"`
+	DBPath               string `mapstructure:"db_path"`
+	ThemeName            string `mapstructure:"theme_name"`
+	DefaultPageSize      int    `mapstructure:"default_page_size"`
+	MaxPageSize          int    `mapstructure:"max_page_size"`
+	MaxSearchHistory     int    `mapstructure:"max_search_history"`
+	SearchHistoryEnabled bool   `mapstructure:"search_history_enabled"`
 }
 
 var (
@@ -21,7 +23,6 @@ var (
 )
 
 func init() {
-	// get home dir
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		panic(fmt.Sprintf("failed to get home directory: %v", err))
@@ -48,7 +49,6 @@ func EnsureConfigDir() error {
 	return os.MkdirAll(configDir, 0755)
 }
 
-// loads config from file
 func LoadConfig() (*Config, error) {
 	if err := EnsureConfigDir(); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
@@ -58,7 +58,6 @@ func LoadConfig() (*Config, error) {
 		return GetDefaultConfig(), nil
 	}
 
-	// setup viper
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
 
@@ -75,12 +74,17 @@ func LoadConfig() (*Config, error) {
 	// apply defaults if not set
 	if cfg.DBPath == "" {
 		cfg.DBPath = filepath.Join(configDir, "tasks.db")
+	} else {
+		cfg.DBPath = expandPath(cfg.DBPath)
 	}
 	if cfg.DefaultPageSize == 0 {
 		cfg.DefaultPageSize = 20
 	}
 	if cfg.MaxPageSize == 0 {
 		cfg.MaxPageSize = 100
+	}
+	if cfg.MaxSearchHistory == 0 {
+		cfg.MaxSearchHistory = 50
 	}
 
 	return &cfg, nil
@@ -96,6 +100,8 @@ func SaveConfig(cfg *Config) error {
 	viper.Set("theme_name", cfg.ThemeName)
 	viper.Set("default_page_size", cfg.DefaultPageSize)
 	viper.Set("max_page_size", cfg.MaxPageSize)
+	viper.Set("max_search_history", cfg.MaxSearchHistory)
+	viper.Set("search_history_enabled", cfg.SearchHistoryEnabled)
 
 	if err := viper.WriteConfigAs(configFile); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
@@ -107,10 +113,12 @@ func SaveConfig(cfg *Config) error {
 // returns default config
 func GetDefaultConfig() *Config {
 	return &Config{
-		DBPath:          filepath.Join(configDir, "tasks.db"),
-		ThemeName:       "",
-		DefaultPageSize: 20,
-		MaxPageSize:     100,
+		DBPath:               filepath.Join(configDir, "tasks.db"),
+		ThemeName:            "",
+		DefaultPageSize:      20,
+		MaxPageSize:          100,
+		MaxSearchHistory:     50,
+		SearchHistoryEnabled: true,
 	}
 }
 
@@ -123,4 +131,21 @@ func UpdateTheme(themeName string) error {
 
 	cfg.ThemeName = themeName
 	return SaveConfig(cfg)
+}
+
+func expandPath(path string) string {
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+
+	if len(path) == 1 || path[1] == '/' || path[1] == filepath.Separator {
+		return filepath.Join(homeDir, path[1:])
+	}
+
+	return path
 }

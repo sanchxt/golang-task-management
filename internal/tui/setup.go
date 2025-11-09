@@ -15,7 +15,6 @@ import (
 	"task-management/internal/theme"
 )
 
-// SetupModel is the model for the initial setup TUI
 type SetupModel struct {
 	themes        []string
 	selectedIndex int
@@ -26,7 +25,6 @@ type SetupModel struct {
 	confirmed     bool
 }
 
-// NewSetupModel creates a new setup model
 func NewSetupModel() SetupModel {
 	themes := theme.ListThemes()
 	currentTheme, _ := theme.GetTheme(themes[0])
@@ -35,8 +33,8 @@ func NewSetupModel() SetupModel {
 		themes:        themes,
 		selectedIndex: 0,
 		currentTheme:  currentTheme,
-		width:         100, // default width
-		height:        30,  // default height
+		width:         100,
+		height:        30,
 	}
 }
 
@@ -74,10 +72,8 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
-			// save theme selection
 			selectedTheme := m.themes[m.selectedIndex]
 			if err := config.UpdateTheme(selectedTheme); err != nil {
-				// if saving fails, just continue
 				fmt.Printf("Warning: failed to save theme: %v\n", err)
 			}
 			m.confirmed = true
@@ -97,10 +93,8 @@ func (m SetupModel) View() string {
 		return "Setup cancelled.\n"
 	}
 
-	// create styles for the current theme
 	styles := theme.NewStyles(m.currentTheme)
 
-	// calculate dimensions with safety checks
 	leftWidth := m.width / 3
 	if leftWidth < 30 {
 		leftWidth = 30
@@ -110,18 +104,14 @@ func (m SetupModel) View() string {
 		rightWidth = 30
 	}
 
-	// ensure minimum dimensions
 	if m.width < 60 || m.height < 10 {
 		return "Terminal too small. Please resize and try again.\n"
 	}
 
-	// render left side (theme list)
 	leftContent := m.renderThemeList(styles, leftWidth)
 
-	// render right side (preview)
 	rightContent := m.renderPreview(styles, rightWidth)
 
-	// combine left and right with lipgloss
 	left := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(m.height - 4).
@@ -140,11 +130,9 @@ func (m SetupModel) View() string {
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	// header
 	header := styles.TUITitle.Render("TaskFlow Initial Setup")
 	subtitle := styles.TUISubtitle.Render("Select a theme to get started")
 
-	// footer
 	help := styles.TUIHelp.Render("↑/k: up • ↓/j: down • enter: confirm • q: quit")
 
 	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s", header, subtitle, main, help)
@@ -170,7 +158,6 @@ func (m SetupModel) renderThemeList(styles *theme.Styles, width int) string {
 		line := fmt.Sprintf("%s%s", prefix, themeName)
 
 		if i == m.selectedIndex {
-			// highlight selected theme
 			line = lipgloss.NewStyle().
 				Foreground(lipgloss.Color(m.currentTheme.SelectedFg)).
 				Background(lipgloss.Color(m.currentTheme.SelectedBg)).
@@ -202,7 +189,6 @@ func (m SetupModel) renderPreview(styles *theme.Styles, width int) string {
 	b.WriteString(title)
 	b.WriteString("\n\n")
 
-	// create sample tasks
 	sampleTasks := []*domain.Task{
 		{
 			ID:          1,
@@ -210,7 +196,7 @@ func (m SetupModel) renderPreview(styles *theme.Styles, width int) string {
 			Description: "Add JWT-based authentication",
 			Priority:    domain.PriorityUrgent,
 			Status:      domain.StatusInProgress,
-			Project:     "backend",
+			ProjectName: "backend",
 			Tags:        []string{"security", "auth"},
 			CreatedAt:   time.Now(),
 			DueDate:     timePtr(time.Now().Add(2 * 24 * time.Hour)),
@@ -221,7 +207,7 @@ func (m SetupModel) renderPreview(styles *theme.Styles, width int) string {
 			Description: "Update API docs",
 			Priority:    domain.PriorityMedium,
 			Status:      domain.StatusPending,
-			Project:     "docs",
+			ProjectName: "docs",
 			Tags:        []string{"documentation"},
 			CreatedAt:   time.Now(),
 		},
@@ -231,16 +217,14 @@ func (m SetupModel) renderPreview(styles *theme.Styles, width int) string {
 			Description: "Users can't login after password reset",
 			Priority:    domain.PriorityHigh,
 			Status:      domain.StatusCompleted,
-			Project:     "frontend",
+			ProjectName: "frontend",
 			Tags:        []string{"bug", "urgent"},
 			CreatedAt:   time.Now(),
 		},
 	}
 
-	// render sample tasks
 	for i, task := range sampleTasks {
 		if i > 0 {
-			// add separator with safety check
 			sepWidth := width - 4
 			if sepWidth < 1 {
 				sepWidth = 1
@@ -261,7 +245,6 @@ func (m SetupModel) renderPreview(styles *theme.Styles, width int) string {
 func (m SetupModel) renderTaskPreview(styles *theme.Styles, task *domain.Task, width int) string {
 	var b strings.Builder
 
-	// title with status icon
 	statusIcon := display.GetStatusIcon(task.Status)
 	titleLine := fmt.Sprintf("%s %s", statusIcon, task.Title)
 	titleStyle := lipgloss.NewStyle().
@@ -270,7 +253,6 @@ func (m SetupModel) renderTaskPreview(styles *theme.Styles, task *domain.Task, w
 	b.WriteString(titleStyle.Render(titleLine))
 	b.WriteString("\n")
 
-	// priority and status
 	priorityIcon := display.GetPriorityIcon(task.Priority)
 	priorityStyle := styles.GetPriorityTextStyle(task.Priority)
 	statusStyle := styles.GetStatusStyle(task.Status)
@@ -283,16 +265,15 @@ func (m SetupModel) renderTaskPreview(styles *theme.Styles, task *domain.Task, w
 	b.WriteString(infoLine)
 	b.WriteString("\n")
 
-	// project and tags if present
-	if task.Project != "" || len(task.Tags) > 0 {
+	if task.ProjectName != "" || len(task.Tags) > 0 {
 		detailLine := "  "
-		if task.Project != "" {
+		if task.ProjectName != "" {
 			detailLine += lipgloss.NewStyle().
 				Foreground(lipgloss.Color(m.currentTheme.Info)).
-				Render(fmt.Sprintf("📁 %s", task.Project))
+				Render(fmt.Sprintf("📁 %s", task.ProjectName))
 		}
 		if len(task.Tags) > 0 {
-			if task.Project != "" {
+			if task.ProjectName != "" {
 				detailLine += " "
 			}
 			detailLine += lipgloss.NewStyle().

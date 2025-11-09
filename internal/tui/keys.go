@@ -2,28 +2,22 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keybinds
 type keyMap struct {
-	// navigation
 	Up     key.Binding
 	Down   key.Binding
 	Enter  key.Binding
 	Back   key.Binding
 
-	// filtering and search
 	Filter       key.Binding
 	ClearFilters key.Binding
 	Search       key.Binding
 
-	// sorting
 	Sort      key.Binding
 	SortOrder key.Binding
 
-	// pagination
 	NextPage key.Binding
 	PrevPage key.Binding
 
-	// actions
 	New           key.Binding
 	Edit          key.Binding
 	MarkComplete  key.Binding
@@ -32,21 +26,41 @@ type keyMap struct {
 	Delete        key.Binding
 	Refresh       key.Binding
 
-	// multi-select
 	ToggleMultiSelect key.Binding
 	ToggleSelection   key.Binding
 	SelectAll         key.Binding
 	DeselectAll       key.Binding
 
-	// general
+	ToggleProjects   key.Binding
+	ExpandProject    key.Binding
+	CollapseProject  key.Binding
+	ViewProject      key.Binding
+	NewProject       key.Binding
+	EditProject      key.Binding
+	DeleteProject    key.Binding
+	ArchiveProject   key.Binding
+	ProjectPicker    key.Binding
+	FilterByProject  key.Binding
+	ViewNotes        key.Binding
+
+	ViewPicker      key.Binding
+	FavoriteViews   key.Binding
+	QuickAccess1    key.Binding
+	QuickAccess2    key.Binding
+	QuickAccess3    key.Binding
+	QuickAccess4    key.Binding
+	QuickAccess5    key.Binding
+	QuickAccess6    key.Binding
+	QuickAccess7    key.Binding
+	QuickAccess8    key.Binding
+	QuickAccess9    key.Binding
+
 	Quit key.Binding
 	Help key.Binding
 }
 
-// default keybinds
 func defaultKeyMap() keyMap {
 	return keyMap{
-		// navigation
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),
 			key.WithHelp("↑/k", "move up"),
@@ -64,7 +78,6 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("esc", "back to list"),
 		),
 
-		// filtering and search
 		Filter: key.NewBinding(
 			key.WithKeys("f"),
 			key.WithHelp("f", "open filters"),
@@ -78,7 +91,6 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("/", "search tasks"),
 		),
 
-		// sorting
 		Sort: key.NewBinding(
 			key.WithKeys("s"),
 			key.WithHelp("s", "cycle sort mode"),
@@ -88,7 +100,6 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("S", "toggle sort order"),
 		),
 
-		// pagination
 		NextPage: key.NewBinding(
 			key.WithKeys("]", "pgdown"),
 			key.WithHelp("]", "next page"),
@@ -98,7 +109,6 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("[", "previous page"),
 		),
 
-		// actions
 		New: key.NewBinding(
 			key.WithKeys("n"),
 			key.WithHelp("n", "new task"),
@@ -128,7 +138,6 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("r", "refresh"),
 		),
 
-		// multi-select
 		ToggleMultiSelect: key.NewBinding(
 			key.WithKeys("v"),
 			key.WithHelp("v", "multi-select mode"),
@@ -146,7 +155,96 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("ctrl+d", "deselect all"),
 		),
 
-		// general
+		ToggleProjects: key.NewBinding(
+			key.WithKeys("P"),
+			key.WithHelp("P", "toggle projects view"),
+		),
+		ExpandProject: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "expand project"),
+		),
+		CollapseProject: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "collapse project"),
+		),
+		ViewProject: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "select project"),
+		),
+		NewProject: key.NewBinding(
+			key.WithKeys("N"),
+			key.WithHelp("N", "new project"),
+		),
+		EditProject: key.NewBinding(
+			key.WithKeys("E"),
+			key.WithHelp("E", "edit project"),
+		),
+		DeleteProject: key.NewBinding(
+			key.WithKeys("D"),
+			key.WithHelp("D", "delete project"),
+		),
+		ArchiveProject: key.NewBinding(
+			key.WithKeys("A"),
+			key.WithHelp("A", "archive/unarchive"),
+		),
+		ProjectPicker: key.NewBinding(
+			key.WithKeys("ctrl+p"),
+			key.WithHelp("ctrl+p", "project picker"),
+		),
+		FilterByProject: key.NewBinding(
+			key.WithKeys("ctrl+f"),
+			key.WithHelp("ctrl+f", "filter by project"),
+		),
+		ViewNotes: key.NewBinding(
+			key.WithKeys("M"),
+			key.WithHelp("M", "view/edit notes"),
+		),
+
+		ViewPicker: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "view picker"),
+		),
+		FavoriteViews: key.NewBinding(
+			key.WithKeys("L"),
+			key.WithHelp("L", "favorite views"),
+		),
+		QuickAccess1: key.NewBinding(
+			key.WithKeys("1"),
+			key.WithHelp("1", "quick access view 1"),
+		),
+		QuickAccess2: key.NewBinding(
+			key.WithKeys("2"),
+			key.WithHelp("2", "quick access view 2"),
+		),
+		QuickAccess3: key.NewBinding(
+			key.WithKeys("3"),
+			key.WithHelp("3", "quick access view 3"),
+		),
+		QuickAccess4: key.NewBinding(
+			key.WithKeys("4"),
+			key.WithHelp("4", "quick access view 4"),
+		),
+		QuickAccess5: key.NewBinding(
+			key.WithKeys("5"),
+			key.WithHelp("5", "quick access view 5"),
+		),
+		QuickAccess6: key.NewBinding(
+			key.WithKeys("6"),
+			key.WithHelp("6", "quick access view 6"),
+		),
+		QuickAccess7: key.NewBinding(
+			key.WithKeys("7"),
+			key.WithHelp("7", "quick access view 7"),
+		),
+		QuickAccess8: key.NewBinding(
+			key.WithKeys("8"),
+			key.WithHelp("8", "quick access view 8"),
+		),
+		QuickAccess9: key.NewBinding(
+			key.WithKeys("9"),
+			key.WithHelp("9", "quick access view 9"),
+		),
+
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -170,6 +268,10 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Filter, k.ClearFilters, k.Search},
 		{k.Sort, k.SortOrder, k.NextPage, k.PrevPage},
 		{k.ToggleMultiSelect, k.ToggleSelection, k.SelectAll, k.DeselectAll},
-		{k.Quit, k.Help},
+		{k.ToggleProjects, k.ViewProject, k.ProjectPicker},
+		{k.ViewPicker, k.FavoriteViews},
+		{k.QuickAccess1, k.QuickAccess2, k.QuickAccess3, k.QuickAccess4},
+		{k.QuickAccess5, k.QuickAccess6, k.QuickAccess7, k.QuickAccess8},
+		{k.QuickAccess9, k.Quit, k.Help},
 	}
 }

@@ -15,7 +15,6 @@ import (
 )
 
 var (
-	// update flags
 	updateTitle       string
 	updateDescription string
 	updatePriority    string
@@ -25,7 +24,6 @@ var (
 	updateDueDate     string
 	updateClearDue    bool
 
-	// flags to track
 	titleSet       bool
 	descriptionSet bool
 	prioritySet    bool
@@ -54,17 +52,15 @@ Examples:
 func init() {
 	rootCmd.AddCommand(updateCmd)
 
-	// flags
 	updateCmd.Flags().StringVar(&updateTitle, "title", "", "Update task title")
 	updateCmd.Flags().StringVar(&updateDescription, "description", "", "Update task description")
 	updateCmd.Flags().StringVar(&updatePriority, "priority", "", "Update priority (low, medium, high, urgent)")
 	updateCmd.Flags().StringVar(&updateStatus, "status", "", "Update status (pending, in_progress, completed, cancelled)")
-	updateCmd.Flags().StringVar(&updateProject, "project", "", "Update project name")
+	updateCmd.Flags().StringVar(&updateProject, "project", "", "Update project (name or ID, empty to remove)")
 	updateCmd.Flags().StringSliceVar(&updateTags, "tags", nil, "Update tags (comma-separated)")
 	updateCmd.Flags().StringVar(&updateDueDate, "due-date", "", "Update due date (YYYY-MM-DD format)")
 	updateCmd.Flags().BoolVar(&updateClearDue, "clear-due-date", false, "Clear the due date")
 
-	// track which flags were set
 	updateCmd.Flags().Lookup("title").Changed = false
 	updateCmd.Flags().Lookup("description").Changed = false
 	updateCmd.Flags().Lookup("priority").Changed = false
@@ -96,7 +92,6 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	styles := theme.NewStyles(themeObj)
 
-	// initialize db
 	db, err := sqlite.NewDB(sqlite.Config{Path: cfg.DBPath})
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
@@ -138,7 +133,17 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		task.Status = domain.Status(updateStatus)
 	}
 	if projectSet {
-		task.Project = updateProject
+		if updateProject == "" {
+			task.ProjectID = nil
+		} else {
+			projectRepo := sqlite.NewProjectRepository(db)
+			projectID, err := lookupProjectID(ctx, projectRepo, updateProject)
+			if err != nil {
+				fmt.Println(styles.Error.Render(fmt.Sprintf("✗ %v", err)))
+				return nil
+			}
+			task.ProjectID = projectID
+		}
 	}
 	if tagsSet {
 		task.Tags = updateTags
@@ -171,7 +176,6 @@ func displayTaskUpdated(task *domain.Task, styles *theme.Styles) {
 	fmt.Println(styles.Success.Render(fmt.Sprintf("✓ Task #%d updated successfully!", task.ID)))
 	fmt.Println()
 
-	// task details
 	fmt.Printf("  %s %s\n", styles.Info.Render("Title:"), task.Title)
 
 	if task.Description != "" {
@@ -181,8 +185,8 @@ func displayTaskUpdated(task *domain.Task, styles *theme.Styles) {
 	fmt.Printf("  %s %s\n", styles.Info.Render("Priority:"), task.Priority)
 	fmt.Printf("  %s %s\n", styles.Info.Render("Status:"), task.Status)
 
-	if task.Project != "" {
-		fmt.Printf("  %s %s\n", styles.Info.Render("Project:"), task.Project)
+	if task.ProjectName != "" {
+		fmt.Printf("  %s %s\n", styles.Info.Render("Project:"), task.ProjectName)
 	}
 
 	if len(task.Tags) > 0 {

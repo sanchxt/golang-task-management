@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,47 +15,53 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"task-management/internal/domain"
+	"task-management/internal/fuzzy"
+	"task-management/internal/query"
+	"task-management/internal/repository"
 )
 
-// updates the model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// handle confirmation dialog first
 	if m.confirm.active {
 		return m.updateConfirmDialog(msg)
 	}
 
-	// handle edit form
+	if m.viewPicker.active {
+		return m.updateViewPicker(msg)
+	}
+
+	if m.projectPicker.active {
+		return m.updateProjectPicker(msg)
+	}
+
 	if m.editForm.active {
 		return m.updateEditMode(msg)
 	}
 
-	// handle search mode
+	if m.projectForm.active {
+		return m.updateProjectFormMode(msg)
+	}
+
 	if m.uiMode == searchingMode {
 		return m.updateSearchMode(msg)
 	}
 
-	// handle filter mode
 	if m.uiMode == filteringMode {
 		return m.updateFilterMode(msg)
 	}
 
-	// normal mode updates
 	return m.updateNormalMode(msg)
 }
 
-// updates confirmation dialog
 func (m Model) updateConfirmDialog(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "y", "Y":
-			// confirm action
 			m.confirm.active = false
 			cmd := m.confirm.onConfirm(&m)
 			return m, cmd
 
 		case "n", "N", "esc":
-			// cancel
 			m.confirm.active = false
 			return m, nil
 		}
@@ -60,55 +69,327 @@ func (m Model) updateConfirmDialog(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updates search mode
+func (m Model) updateProjectPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.projectPicker.active = false
+			return m, nil
+
+		case "up", "k":
+			if m.projectPicker.cursor > 0 {
+				m.projectPicker.cursor--
+			}
+			return m, nil
+
+		case "down", "j":
+			visibleProjects := m.getVisiblePickerProjects()
+			if m.projectPicker.cursor < len(visibleProjects)-1 {
+				m.projectPicker.cursor++
+			}
+			return m, nil
+
+		case "enter":
+			visibleProjects := m.getVisiblePickerProjects()
+			if m.projectPicker.cursor < len(visibleProjects) {
+				selectedProject := visibleProjects[m.projectPicker.cursor]
+				m.projectPicker.selected = selectedProject
+
+				m.editForm.projectInput.SetValue(selectedProject.Name)
+
+				m.projectPicker.active = false
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) getVisiblePickerProjects() []*domain.Project {
+	return m.projectPicker.projects
+}
+
+func (m *Model) lookupProjectByFuzzyName(ctx context.Context, searchName string, threshold int) (*int64, error) {
+	if strings.TrimSpace(searchName) == "" {
+		return nil, fmt.Errorf("search name cannot be empty")
+	}
+
+	filter := repository.ProjectFilter{
+		ExcludeArchived: true,
+	}
+
+	projects, err := m.projectRepo.List(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	if len(projects) == 0 {
+		return nil, fmt.Errorf("no matching project found for '%s'", searchName)
+	}
+
+	type projectWithScore struct {
+		project *domain.Project
+		score   int
+	}
+
+	scoredProjects := make([]projectWithScore, 0, len(projects))
+	for _, proj := range projects {
+		score := fuzzy.Match(searchName, proj.Name)
+		if score >= threshold {
+			scoredProjects = append(scoredProjects, projectWithScore{
+				project: proj,
+				score:   score,
+			})
+		}
+	}
+
+	if len(scoredProjects) == 0 {
+		return nil, fmt.Errorf("no matching project found for '%s' (threshold: %d)", searchName, threshold)
+	}
+
+	sort.Slice(scoredProjects, func(i, j int) bool {
+		return scoredProjects[i].score > scoredProjects[j].score
+	})
+
+	bestMatch := scoredProjects[0].project
+	return &bestMatch.ID, nil
+}
+
+func (m *Model) lookupProjectID(ctx context.Context, projectStr string) (*int64, error) {
+	if strings.TrimSpace(projectStr) == "" {
+		return nil, nil
+	}
+
+	if id, err := strconv.ParseInt(projectStr, 10, 64); err == nil {
+		project, err := m.projectRepo.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("project with ID %d not found: %w", id, err)
+		}
+		return &project.ID, nil
+	}
+
+	project, err := m.projectRepo.GetByName(ctx, projectStr)
+	if err != nil {
+		return nil, fmt.Errorf("project '%s' not found: %w", projectStr, err)
+	}
+
+	return &project.ID, nil
+}
+
 func (m Model) updateSearchMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.historyDropdown.active {
+			switch msg.String() {
+			case "esc":
+				m.historyDropdown.active = false
+				m.historyDropdown.cursor = 0
+				return m, nil
+
+			case "up", "k":
+				if m.historyDropdown.cursor > 0 {
+					m.historyDropdown.cursor--
+				}
+				return m, nil
+
+			case "down", "j":
+				if m.historyDropdown.cursor < len(m.searchHistory)-1 {
+					m.historyDropdown.cursor++
+				}
+				return m, nil
+
+			case "enter":
+				if m.historyDropdown.cursor < len(m.searchHistory) {
+					selected := m.searchHistory[m.historyDropdown.cursor]
+					m.searchInput.SetValue(selected.QueryText)
+
+					if selected.SearchMode == domain.SearchModeFuzzy {
+						m.fuzzyMode = true
+						if selected.FuzzyThreshold != nil {
+							m.fuzzyThreshold = *selected.FuzzyThreshold
+						}
+					} else {
+						m.fuzzyMode = false
+					}
+
+					m.historyDropdown.active = false
+					m.historyDropdown.cursor = 0
+				}
+				return m, nil
+			}
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Back):
-			// exit search mode
+			if m.showQueryHelp {
+				m.showQueryHelp = false
+				return m, nil
+			}
+			if m.historyDropdown.active {
+				m.historyDropdown.active = false
+				m.historyDropdown.cursor = 0
+				return m, nil
+			}
 			m.uiMode = normalMode
 			m.searchInput.Blur()
 			return m, nil
 
+		case msg.String() == "up":
+			if m.searchInput.Value() == "" && len(m.searchHistory) > 0 {
+				m.historyDropdown.active = true
+				m.historyDropdown.cursor = 0
+				return m, nil
+			}
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			return m, cmd
+
+		case msg.String() == "f" || msg.String() == "F":
+			m.fuzzyMode = !m.fuzzyMode
+			return m, nil
+
+		case msg.String() == "?":
+			m.showQueryHelp = !m.showQueryHelp
+			return m, nil
+
 		case msg.Type == tea.KeyEnter:
-			// apply search
 			searchQuery := m.searchInput.Value()
 
-			// check for regex mode (re: prefix)
-			if strings.HasPrefix(searchQuery, "re:") {
-				m.filter.SearchMode = "regex"
-				m.filter.SearchQuery = strings.TrimPrefix(searchQuery, "re:")
-			} else if strings.HasPrefix(searchQuery, "/") {
-				m.filter.SearchMode = "text"
-				m.filter.SearchQuery = strings.TrimPrefix(searchQuery, "/")
+			if query.IsQueryLanguage(searchQuery) {
+				m.queryMode = true
+				m.queryString = searchQuery
+
+				converterCtx := &query.ConverterContext{
+					ProjectRepo: m.projectRepo,
+				}
+				m.uiMode = normalMode
+				m.searchInput.Blur()
+				m.loading = true
+
+				historyEntry := &domain.SearchHistory{
+					QueryText:  searchQuery,
+					SearchMode: domain.SearchModeText,
+					QueryType:  domain.QueryTypeQueryLanguage,
+				}
+				recordCmd := recordSearchCmd(m.ctx, m.searchHistoryRepo, historyEntry)
+
+				return m, tea.Batch(parseQueryLanguageCmd(m.ctx, searchQuery, converterCtx), recordCmd)
+			}
+
+			m.queryMode = false
+			m.queryString = ""
+
+			parsedQuery, err := query.ParseProjectMentions(searchQuery)
+			if err != nil {
+				m.err = fmt.Errorf("failed to parse query: %w", err)
+				m.uiMode = normalMode
+				m.searchInput.Blur()
+				return m, nil
+			}
+
+			if parsedQuery.HasProjectFilter() {
+				mention := parsedQuery.ProjectMentions[0]
+				ctx := context.Background()
+
+				if mention.Fuzzy {
+					fuzzyThreshold := 60
+					projectID, err := m.lookupProjectByFuzzyName(ctx, mention.Name, fuzzyThreshold)
+					if err != nil {
+						m.err = err
+						m.uiMode = normalMode
+						m.searchInput.Blur()
+						return m, nil
+					}
+					m.filter.ProjectID = projectID
+				} else {
+					projectID, err := m.lookupProjectID(ctx, mention.Name)
+					if err != nil {
+						m.err = err
+						m.uiMode = normalMode
+						m.searchInput.Blur()
+						return m, nil
+					}
+					m.filter.ProjectID = projectID
+				}
+
+				searchQuery = parsedQuery.BaseQuery
+			}
+
+			if searchQuery != "" {
+				if strings.HasPrefix(searchQuery, "re:") {
+					m.filter.SearchMode = "regex"
+					m.filter.SearchQuery = strings.TrimPrefix(searchQuery, "re:")
+				} else if m.fuzzyMode {
+					m.filter.SearchMode = "fuzzy"
+					m.filter.SearchQuery = searchQuery
+					m.filter.FuzzyThreshold = m.fuzzyThreshold
+				} else if strings.HasPrefix(searchQuery, "/") {
+					m.filter.SearchMode = "text"
+					m.filter.SearchQuery = strings.TrimPrefix(searchQuery, "/")
+				} else {
+					m.filter.SearchMode = "text"
+					m.filter.SearchQuery = searchQuery
+				}
 			} else {
-				m.filter.SearchMode = "text"
-				m.filter.SearchQuery = searchQuery
+				m.filter.SearchQuery = ""
+				m.filter.SearchMode = ""
 			}
 
 			m.currentPage = 1
 			m.uiMode = normalMode
 			m.searchInput.Blur()
 			m.loading = true
+
+			if m.filter.SearchQuery != "" {
+				queryType := domain.QueryTypeSimple
+				if parsedQuery.HasProjectFilter() {
+					queryType = domain.QueryTypeProjectMention
+				}
+
+				var searchMode domain.SearchMode
+				switch m.filter.SearchMode {
+				case "regex":
+					searchMode = domain.SearchModeRegex
+				case "fuzzy":
+					searchMode = domain.SearchModeFuzzy
+				default:
+					searchMode = domain.SearchModeText
+				}
+
+				historyEntry := &domain.SearchHistory{
+					QueryText:  m.filter.SearchQuery,
+					SearchMode: searchMode,
+					QueryType:  queryType,
+				}
+
+				if searchMode == domain.SearchModeFuzzy {
+					historyEntry.FuzzyThreshold = &m.fuzzyThreshold
+				}
+
+				if parsedQuery.HasProjectFilter() {
+					mention := parsedQuery.ProjectMentions[0]
+					historyEntry.ProjectFilter = mention.Name
+				}
+
+				recordCmd := recordSearchCmd(m.ctx, m.searchHistoryRepo, historyEntry)
+				return m, tea.Batch(m.refreshCmd(), recordCmd)
+			}
+
 			return m, m.refreshCmd()
 		}
 	}
 
-	// update search input
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	return m, cmd
 }
 
-// updates filter mode
 func (m Model) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Back):
-			// exit filter mode
 			m.uiMode = normalMode
 			m.filterPanel.active = false
 			return m, nil
@@ -126,14 +407,12 @@ func (m Model) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case msg.Type == tea.KeyEnter:
-			// apply selected filter
 			return m.applyFilterSelection()
 		}
 	}
 	return m, nil
 }
 
-// applies filter selection
 func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 	if m.filterPanel.selectedItem < 0 || m.filterPanel.selectedItem >= len(m.filterPanel.items) {
 		return m, nil
@@ -156,8 +435,16 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 			m.filter.Priority = domain.Priority(item.value)
 		}
 
+	case "project":
+		if item.value == "" {
+			m.filter.ProjectID = nil
+		} else {
+			var projectID int64
+			fmt.Sscanf(item.value, "%d", &projectID)
+			m.filter.ProjectID = &projectID
+		}
+
 	case "duedate":
-		// clear existing date filters first
 		m.filter.DueDateFrom = nil
 		m.filter.DueDateTo = nil
 
@@ -166,41 +453,33 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 
 		switch item.value {
 		case "":
-			// All - no date filter
 		case "overdue":
-			// Tasks with due date before today
 			yesterday := today.AddDate(0, 0, -1).Format("2006-01-02")
 			m.filter.DueDateTo = &yesterday
 		case "today":
-			// Tasks due today
 			todayStr := today.Format("2006-01-02")
 			tomorrowStr := today.AddDate(0, 0, 1).Format("2006-01-02")
 			m.filter.DueDateFrom = &todayStr
 			m.filter.DueDateTo = &tomorrowStr
 		case "week":
-			// Tasks due within the next 7 days
 			todayStr := today.Format("2006-01-02")
 			weekStr := today.AddDate(0, 0, 7).Format("2006-01-02")
 			m.filter.DueDateFrom = &todayStr
 			m.filter.DueDateTo = &weekStr
 		case "month":
-			// Tasks due within the next 30 days
 			todayStr := today.Format("2006-01-02")
 			monthStr := today.AddDate(0, 0, 30).Format("2006-01-02")
 			m.filter.DueDateFrom = &todayStr
 			m.filter.DueDateTo = &monthStr
 		case "none":
-			// Tasks with no due date - this requires a different approach
-			// We'll use a special marker value
 			noneMarker := "none"
 			m.filter.DueDateFrom = &noneMarker
 		}
 
 	case "clear":
-		// clear all filters
 		m.filter.Status = ""
 		m.filter.Priority = ""
-		m.filter.Project = ""
+		m.filter.ProjectID = nil
 		m.filter.Tags = []string{}
 		m.filter.SearchQuery = ""
 		m.filter.SearchMode = ""
@@ -208,7 +487,6 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 		m.filter.DueDateTo = nil
 
 	case "sort":
-		// handled separately via keybindings
 		return m, nil
 	}
 
@@ -219,7 +497,6 @@ func (m Model) applyFilterSelection() (tea.Model, tea.Cmd) {
 	return m, m.refreshCmd()
 }
 
-// updates normal mode
 func (m Model) updateNormalMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -230,11 +507,13 @@ func (m Model) updateNormalMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.table.SetHeight(msg.Height - 12) // leave room for header, status bar, help
+		if m.viewMode == projectView {
+		} else {
+			m.table.SetHeight(msg.Height - 12)
+		}
 		return m, nil
 
 	case tasksLoadedMsg:
-		// tasks loaded successfully
 		m.tasks = msg.tasks
 		m.totalCount = msg.totalCount
 		m.loading = false
@@ -243,28 +522,96 @@ func (m Model) updateNormalMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateTableRows()
 		return m, nil
 
+	case queryParsedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.queryMode = false
+			return m, nil
+		}
+
+		m.filter = msg.filter
+		m.currentPage = 1
+		m.message = fmt.Sprintf("🔍 Query: %s", msg.queryStr)
+		return m, fetchTasksCmd(m.ctx, m.repo, m.filter, m.currentPage, m.pageSize)
+
 	case taskUpdatedMsg:
-		// task updated successfully
 		m.message = "Task updated successfully"
 		m.loading = false
 		return m, m.refreshCmd()
 
 	case taskDeletedMsg:
-		// task deleted successfully
 		m.message = "Task deleted successfully"
 		m.loading = false
 		m.selectedTask = nil
 		m.viewMode = tableView
 		return m, m.refreshCmd()
 
+	case projectsLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.loading = false
+			return m, nil
+		}
+		m.projects = msg.projects
+		m.projectTree = buildProjectTree(msg.projects)
+		m.loading = false
+		return m, nil
+
+	case projectCreatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.loading = false
+			return m, nil
+		}
+		m.message = "Project created successfully"
+		m.loading = false
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+
+	case projectUpdatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.loading = false
+			return m, nil
+		}
+		m.message = "Project updated successfully"
+		m.loading = false
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+
+	case projectDeletedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.loading = false
+			return m, nil
+		}
+		m.message = "Project deleted successfully"
+		m.loading = false
+		m.selectedProject = nil
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+
+	case projectStatsMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.projectStats[msg.projectID] = projectStatsData{
+			taskCount: msg.taskCount,
+			stats:     msg.stats,
+		}
+		if m.selectedProject != nil && m.selectedProject.ID == msg.projectID {
+			m.selectedProject.TaskCount = msg.taskCount
+		}
+		return m, nil
+
 	case errMsg:
-		// error occurred
 		m.err = msg.err
 		m.loading = false
 		return m, nil
 	}
 
-	// update table if in table view
 	if m.viewMode == tableView && m.uiMode == normalMode {
 		m.table, cmd = m.table.Update(msg)
 	}
@@ -272,8 +619,15 @@ func (m Model) updateNormalMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handles key presses in normal mode
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.viewMode == projectView {
+		return m.handleProjectViewKeyPress(msg)
+	}
+
+	if m.viewMode == notesView {
+		return m.handleNotesViewKeyPress(msg)
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -282,8 +636,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 		return m, nil
 
+	case msg.String() == "?":
+		if m.queryMode {
+			m.showQueryHelp = !m.showQueryHelp
+			return m, nil
+		}
+
+	case key.Matches(msg, m.keys.ToggleProjects):
+		m.viewMode = projectView
+		m.projectCursor = 0
+		visibleNodes := m.getVisibleProjectNodes()
+		if len(visibleNodes) > 0 {
+			m.selectedProject = visibleNodes[0].project
+		}
+		m.message = "Project View (Press P or Esc to go back)"
+		return m, nil
+
 	case key.Matches(msg, m.keys.Filter):
-		// open filter panel
 		m.uiMode = filteringMode
 		m.filterPanel.active = true
 		m.filterPanel.selectedItem = 0
@@ -291,10 +660,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.ClearFilters):
-		// clear all filters
 		m.filter.Status = ""
 		m.filter.Priority = ""
-		m.filter.Project = ""
+		m.filter.ProjectID = nil
 		m.filter.Tags = []string{}
 		m.filter.SearchQuery = ""
 		m.filter.SearchMode = ""
@@ -303,21 +671,18 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 
 	case key.Matches(msg, m.keys.Search):
-		// enter search mode
 		m.uiMode = searchingMode
 		m.searchInput.Focus()
 		m.searchInput.SetValue(m.filter.SearchQuery)
 		return m, nil
 
 	case key.Matches(msg, m.keys.Sort):
-		// cycle sort mode
 		m.cycleSortMode()
 		m.currentPage = 1
 		m.loading = true
 		return m, m.refreshCmd()
 
 	case key.Matches(msg, m.keys.SortOrder):
-		// toggle sort order
 		if m.filter.SortOrder == "asc" {
 			m.filter.SortOrder = "desc"
 		} else {
@@ -328,7 +693,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 
 	case key.Matches(msg, m.keys.NextPage):
-		// next page
 		totalPages := m.calculateTotalPages()
 		if m.currentPage < totalPages {
 			m.currentPage++
@@ -338,7 +702,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.PrevPage):
-		// previous page
 		if m.currentPage > 1 {
 			m.currentPage--
 			m.loading = true
@@ -347,13 +710,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Refresh):
-		// refresh tasks
 		m.loading = true
 		return m, m.refreshCmd()
 
 	case key.Matches(msg, m.keys.Enter):
 		if m.viewMode == tableView && len(m.tasks) > 0 {
-			// switch to detail view
 			selectedRow := m.table.Cursor()
 			if selectedRow < len(m.tasks) {
 				m.selectedTask = m.tasks[selectedRow]
@@ -364,7 +725,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Back):
 		if m.viewMode == detailView {
-			// back to table view
 			m.viewMode = tableView
 			m.selectedTask = nil
 			m.message = ""
@@ -372,37 +732,33 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Up):
-		if m.viewMode == detailView {
-			// prev task in detail view
-			m.navigateToPreviousTask()
-			return m, nil
-		} else if m.viewMode == tableView {
-			// let table handle navigation
-			var cmd tea.Cmd
-			m.table, cmd = m.table.Update(msg)
-			return m, cmd
+		switch m.viewMode {
+			case detailView:
+				m.navigateToPreviousTask()
+				return m, nil
+			case tableView:
+				var cmd tea.Cmd
+				m.table, cmd = m.table.Update(msg)
+				return m, cmd
 		}
 
 	case key.Matches(msg, m.keys.Down):
-		if m.viewMode == detailView {
-			// next task in detail view
-			m.navigateToNextTask()
-			return m, nil
-		} else if m.viewMode == tableView {
-			// let table handle navigation
-			var cmd tea.Cmd
-			m.table, cmd = m.table.Update(msg)
-			return m, cmd
+		switch m.viewMode {
+			case detailView:
+				m.navigateToNextTask()
+				return m, nil
+			case tableView:
+				var cmd tea.Cmd
+				m.table, cmd = m.table.Update(msg)
+				return m, cmd
 		}
 
-	// Task creation and editing
 	case key.Matches(msg, m.keys.New):
 		return m.handleNewTask()
 
 	case key.Matches(msg, m.keys.Edit):
 		return m.handleEditTask()
 
-	// Multi-select
 	case key.Matches(msg, m.keys.ToggleMultiSelect):
 		return m.handleToggleMultiSelect()
 
@@ -421,7 +777,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleDeselectAll()
 		}
 
-	// Quick actions
 	case key.Matches(msg, m.keys.MarkComplete):
 		if m.multiSelect.enabled && len(m.multiSelect.selectedTasks) > 0 {
 			return m.handleBulkMarkComplete()
@@ -450,7 +805,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// Quick action handlers
 
 func (m Model) handleMarkComplete() (tea.Model, tea.Cmd) {
 	task := m.getSelectedTask()
@@ -458,7 +812,6 @@ func (m Model) handleMarkComplete() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// toggle between pending/completed
 	if task.Status == domain.StatusCompleted {
 		task.Status = domain.StatusPending
 	} else {
@@ -475,7 +828,6 @@ func (m Model) handleCyclePriority() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// cycle: low -> medium -> high -> urgent -> low
 	switch task.Priority {
 	case domain.PriorityLow:
 		task.Priority = domain.PriorityMedium
@@ -499,7 +851,6 @@ func (m Model) handleDelete() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// show confirmation dialog
 	m.confirm = confirmDialog{
 		message: "Delete task: " + task.Title + "?",
 		active:  true,
@@ -517,21 +868,19 @@ func (m Model) handleToggleStatus() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// toggle between pending/in_progress
-	if task.Status == domain.StatusPending {
-		task.Status = domain.StatusInProgress
-	} else if task.Status == domain.StatusInProgress {
-		task.Status = domain.StatusPending
-	} else {
-		// if other status, set to in_progress
-		task.Status = domain.StatusInProgress
+	switch task.Status {
+		case domain.StatusPending:
+			task.Status = domain.StatusInProgress
+		case domain.StatusInProgress:
+			task.Status = domain.StatusPending
+		default:
+			task.Status = domain.StatusInProgress
 	}
 
 	m.loading = true
 	return m, updateTaskCmd(m.ctx, m.repo, task)
 }
 
-// Helper methods
 
 func (m *Model) getSelectedTask() *domain.Task {
 	if m.viewMode == detailView {
@@ -547,7 +896,6 @@ func (m *Model) getSelectedTask() *domain.Task {
 }
 
 func (m *Model) cycleSortMode() {
-	// cycle: created_at -> updated_at -> priority -> due_date -> title -> created_at
 	switch m.filter.SortBy {
 	case "created_at":
 		m.filter.SortBy = "updated_at"
@@ -595,6 +943,20 @@ func (m *Model) buildFilterItems() []filterItem {
 		{label: "  ○ High", value: "high", filterType: "priority"},
 		{label: "  ○ Urgent", value: "urgent", filterType: "priority"},
 		{label: "", value: "", filterType: ""},
+		{label: "Filter by Project", value: "", filterType: "project"},
+		{label: "  ○ All", value: "", filterType: "project"},
+	}
+
+	for _, proj := range m.projects {
+		items = append(items, filterItem{
+			label:      fmt.Sprintf("  ○ %s", proj.Name),
+			value:      fmt.Sprintf("%d", proj.ID),
+			filterType: "project",
+		})
+	}
+
+	items = append(items, []filterItem{
+		{label: "", value: "", filterType: ""},
 		{label: "Filter by Due Date", value: "", filterType: "duedate"},
 		{label: "  ○ All", value: "", filterType: "duedate"},
 		{label: "  ○ Overdue", value: "overdue", filterType: "duedate"},
@@ -604,17 +966,15 @@ func (m *Model) buildFilterItems() []filterItem {
 		{label: "  ○ No Due Date", value: "none", filterType: "duedate"},
 		{label: "", value: "", filterType: ""},
 		{label: "Clear All Filters", value: "", filterType: "clear"},
-	}
+	}...)
 	return items
 }
 
-// navigates to prev task
 func (m *Model) navigateToPreviousTask() {
 	if m.selectedTask == nil || len(m.tasks) == 0 {
 		return
 	}
 
-	// find current task index
 	currentIndex := -1
 	for i, task := range m.tasks {
 		if task.ID == m.selectedTask.ID {
@@ -636,7 +996,6 @@ func (m *Model) navigateToPreviousTask() {
 	m.table.SetCursor(prevIndex)
 }
 
-// navigates to next task
 func (m *Model) navigateToNextTask() {
 	if m.selectedTask == nil || len(m.tasks) == 0 {
 		return
@@ -663,7 +1022,6 @@ func (m *Model) navigateToNextTask() {
 	m.table.SetCursor(nextIndex)
 }
 
-// Edit mode handler
 
 func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -672,18 +1030,15 @@ func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
-			// cancel edit
 			m.editForm.active = false
 			m.editForm.err = ""
 			m.viewMode = tableView
 			return m, nil
 
 		case "ctrl+s", "ctrl+enter":
-			// save task
 			return m.handleSaveTask()
 
 		case "tab":
-			// next field
 			m.editForm.focusedField++
 			if m.editForm.focusedField > 4 {
 				m.editForm.focusedField = 0
@@ -692,7 +1047,6 @@ func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "shift+tab":
-			// previous field
 			m.editForm.focusedField--
 			if m.editForm.focusedField < 0 {
 				m.editForm.focusedField = 4
@@ -701,13 +1055,21 @@ func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+p":
-			// cycle priority
-			priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
-			m.editForm.priorityIdx = (m.editForm.priorityIdx + 1) % len(priorities)
-			return m, nil
+			if m.editForm.focusedField == 2 {
+				m.projectPicker.active = true
+				m.projectPicker.projects = m.projects
+				m.projectPicker.cursor = 0
+				m.projectPicker.searchQuery = ""
+				m.projectPicker.selected = nil
+				m.projectPicker.tree = buildProjectTree(m.projects)
+				return m, nil
+			} else {
+				priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
+				m.editForm.priorityIdx = (m.editForm.priorityIdx + 1) % len(priorities)
+				return m, nil
+			}
 
 		case "ctrl+t":
-			// cycle status
 			statuses := []domain.Status{domain.StatusPending, domain.StatusInProgress, domain.StatusCompleted, domain.StatusCancelled}
 			m.editForm.statusIdx = (m.editForm.statusIdx + 1) % len(statuses)
 			return m, nil
@@ -736,7 +1098,6 @@ func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// update focused field
 	var cmd tea.Cmd
 	switch m.editForm.focusedField {
 	case 0:
@@ -759,7 +1120,178 @@ func (m Model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// New task and edit handlers
+func (m Model) updateProjectFormMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.resetProjectForm()
+			m.viewMode = projectView
+			return m, nil
+
+		case "ctrl+s", "ctrl+enter":
+			return m.handleSaveProject()
+
+		case "tab":
+			m.projectForm.focusedField++
+			if m.projectForm.focusedField > 4 {
+				m.projectForm.focusedField = 0
+			}
+			m.updateProjectFormFocus()
+			return m, nil
+
+		case "shift+tab":
+			m.projectForm.focusedField--
+			if m.projectForm.focusedField < 0 {
+				m.projectForm.focusedField = 4
+			}
+			m.updateProjectFormFocus()
+			return m, nil
+
+		case "ctrl+t":
+			if m.projectForm.mode == editProjectMode {
+				statuses := []domain.ProjectStatus{domain.ProjectStatusActive, domain.ProjectStatusArchived, domain.ProjectStatusCompleted}
+				m.projectForm.statusIdx = (m.projectForm.statusIdx + 1) % len(statuses)
+			}
+			return m, nil
+		}
+
+	case projectCreatedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.projectForm.errors["general"] = msg.err.Error()
+			return m, nil
+		}
+		m.message = fmt.Sprintf("Project '%s' created successfully", msg.project.Name)
+		m.resetProjectForm()
+		m.viewMode = projectView
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+
+	case projectUpdatedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.projectForm.errors["general"] = msg.err.Error()
+			return m, nil
+		}
+		m.message = fmt.Sprintf("Project '%s' updated successfully", msg.project.Name)
+		m.resetProjectForm()
+		m.viewMode = projectView
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+	}
+
+	var cmd tea.Cmd
+	switch m.projectForm.focusedField {
+	case 0:
+		m.projectForm.nameInput, cmd = m.projectForm.nameInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 1:
+		m.projectForm.descInput, cmd = m.projectForm.descInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 2:
+		m.projectForm.parentInput, cmd = m.projectForm.parentInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 3:
+		m.projectForm.colorInput, cmd = m.projectForm.colorInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case 4:
+		m.projectForm.iconInput, cmd = m.projectForm.iconInput.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) updateProjectFormFocus() {
+	m.projectForm.nameInput.Blur()
+	m.projectForm.descInput.Blur()
+	m.projectForm.parentInput.Blur()
+	m.projectForm.colorInput.Blur()
+	m.projectForm.iconInput.Blur()
+
+	switch m.projectForm.focusedField {
+	case 0:
+		m.projectForm.nameInput.Focus()
+	case 1:
+		m.projectForm.descInput.Focus()
+	case 2:
+		m.projectForm.parentInput.Focus()
+	case 3:
+		m.projectForm.colorInput.Focus()
+	case 4:
+		m.projectForm.iconInput.Focus()
+	}
+}
+
+func (m Model) handleSaveProject() (tea.Model, tea.Cmd) {
+	if !m.validateProjectForm() {
+		return m, nil
+	}
+
+	name := strings.TrimSpace(m.projectForm.nameInput.Value())
+	desc := strings.TrimSpace(m.projectForm.descInput.Value())
+	parentInput := strings.TrimSpace(m.projectForm.parentInput.Value())
+	color := strings.TrimSpace(m.projectForm.colorInput.Value())
+	icon := strings.TrimSpace(m.projectForm.iconInput.Value())
+
+	var parentID *int64
+	if parentInput != "" {
+		parent := m.lookupProjectForForm(parentInput)
+		if parent != nil {
+			parentID = &parent.ID
+		} else {
+			m.projectForm.errors["parent"] = "Parent project not found"
+			return m, nil
+		}
+	}
+
+	if m.projectForm.mode == createProjectMode {
+		project := domain.NewProject(name)
+		project.Description = desc
+		project.ParentID = parentID
+		project.Color = color
+		project.Icon = icon
+
+		if err := project.Validate(); err != nil {
+			m.projectForm.errors["general"] = err.Error()
+			return m, nil
+		}
+
+		m.loading = true
+		return m, createProjectCmd(m.ctx, m.projectRepo, project)
+	} else {
+		project := m.projectForm.editingProject
+		if project == nil {
+			m.projectForm.errors["general"] = "No project to edit"
+			return m, nil
+		}
+
+		project.Name = name
+		project.Description = desc
+		project.ParentID = parentID
+		project.Color = color
+		project.Icon = icon
+
+		statuses := []domain.ProjectStatus{domain.ProjectStatusActive, domain.ProjectStatusArchived, domain.ProjectStatusCompleted}
+		if m.projectForm.statusIdx >= 0 && m.projectForm.statusIdx < len(statuses) {
+			project.Status = statuses[m.projectForm.statusIdx]
+		}
+
+		if err := project.Validate(); err != nil {
+			m.projectForm.errors["general"] = err.Error()
+			return m, nil
+		}
+
+		m.loading = true
+		return m, updateProjectCmd(m.ctx, m.projectRepo, project)
+	}
+}
+
 
 func (m Model) handleNewTask() (tea.Model, tea.Cmd) {
 	m.initEditForm(nil)
@@ -783,7 +1315,6 @@ func (m Model) handleEditTask() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) initEditForm(task *domain.Task) {
-	// initialize text inputs
 	titleInput := textinput.New()
 	titleInput.Placeholder = "Task title"
 	titleInput.CharLimit = 200
@@ -819,11 +1350,10 @@ func (m *Model) initEditForm(task *domain.Task) {
 	m.editForm.err = ""
 
 	if task != nil {
-		// editing existing task
 		m.editForm.editingTask = task
 		m.editForm.titleInput.SetValue(task.Title)
 		m.editForm.descInput.SetValue(task.Description)
-		m.editForm.projectInput.SetValue(task.Project)
+		m.editForm.projectInput.SetValue(task.ProjectName)
 		if len(task.Tags) > 0 {
 			m.editForm.tagsInput.SetValue(strings.Join(task.Tags, ", "))
 		}
@@ -831,7 +1361,6 @@ func (m *Model) initEditForm(task *domain.Task) {
 			m.editForm.dueDateInput.SetValue(task.DueDate.Format("2006-01-02"))
 		}
 
-		// set priority and status indices
 		priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
 		for i, p := range priorities {
 			if p == task.Priority {
@@ -848,10 +1377,9 @@ func (m *Model) initEditForm(task *domain.Task) {
 			}
 		}
 	} else {
-		// new task
 		m.editForm.editingTask = nil
-		m.editForm.priorityIdx = 1 // default to medium
-		m.editForm.statusIdx = 0    // default to pending
+		m.editForm.priorityIdx = 1
+		m.editForm.statusIdx = 0
 	}
 
 	m.editForm.titleInput.Focus()
@@ -879,7 +1407,6 @@ func (m *Model) updateFormFocus() {
 }
 
 func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
-	// build task from form
 	title := strings.TrimSpace(m.editForm.titleInput.Value())
 	if title == "" {
 		m.editForm.err = "Title is required"
@@ -887,9 +1414,18 @@ func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
 	}
 
 	description := strings.TrimSpace(m.editForm.descInput.Value())
-	project := strings.TrimSpace(m.editForm.projectInput.Value())
 
-	// parse tags
+	projectName := strings.TrimSpace(m.editForm.projectInput.Value())
+	var projectID *int64
+	if projectName != "" {
+		for _, proj := range m.projects {
+			if strings.EqualFold(proj.Name, projectName) {
+				projectID = &proj.ID
+				break
+			}
+		}
+	}
+
 	var tags []string
 	tagsStr := strings.TrimSpace(m.editForm.tagsInput.Value())
 	if tagsStr != "" {
@@ -901,24 +1437,20 @@ func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// parse due date
 	dueDateStr := strings.TrimSpace(m.editForm.dueDateInput.Value())
 
 	priorities := []domain.Priority{domain.PriorityLow, domain.PriorityMedium, domain.PriorityHigh, domain.PriorityUrgent}
 	statuses := []domain.Status{domain.StatusPending, domain.StatusInProgress, domain.StatusCompleted, domain.StatusCancelled}
 
 	if m.editForm.isNewTask {
-		// create new task
 		task := domain.NewTask(title)
 		task.Description = description
-		task.Project = project
+		task.ProjectID = projectID
 		task.Tags = tags
 		task.Priority = priorities[m.editForm.priorityIdx]
 		task.Status = statuses[m.editForm.statusIdx]
 
-		// parse due date if provided
 		if dueDateStr != "" {
-			// Simple date parsing (you can enhance this)
 			dueTime, err := domain.ParseDueDate(dueDateStr)
 			if err == nil {
 				task.DueDate = dueTime
@@ -928,16 +1460,14 @@ func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, createTaskCmd(m.ctx, m.repo, task)
 	} else {
-		// update existing task
 		task := m.editForm.editingTask
 		task.Title = title
 		task.Description = description
-		task.Project = project
+		task.ProjectID = projectID
 		task.Tags = tags
 		task.Priority = priorities[m.editForm.priorityIdx]
 		task.Status = statuses[m.editForm.statusIdx]
 
-		// parse due date if provided
 		if dueDateStr != "" {
 			dueTime, err := domain.ParseDueDate(dueDateStr)
 			if err == nil {
@@ -952,12 +1482,10 @@ func (m Model) handleSaveTask() (tea.Model, tea.Cmd) {
 	}
 }
 
-// Multi-select handlers
 
 func (m Model) handleToggleMultiSelect() (tea.Model, tea.Cmd) {
 	m.multiSelect.enabled = !m.multiSelect.enabled
 	if !m.multiSelect.enabled {
-		// clear selections when disabling
 		m.multiSelect.selectedTasks = make(map[int64]bool)
 	}
 	return m, nil
@@ -990,14 +1518,12 @@ func (m Model) handleDeselectAll() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// Bulk operation handlers
 
 func (m Model) handleBulkMarkComplete() (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	for _, task := range m.tasks {
 		if m.multiSelect.selectedTasks[task.ID] {
-			// toggle between pending/completed
 			if task.Status == domain.StatusCompleted {
 				task.Status = domain.StatusPending
 			} else {
@@ -1017,7 +1543,6 @@ func (m Model) handleBulkCyclePriority() (tea.Model, tea.Cmd) {
 
 	for _, task := range m.tasks {
 		if m.multiSelect.selectedTasks[task.ID] {
-			// cycle priority
 			switch task.Priority {
 			case domain.PriorityLow:
 				task.Priority = domain.PriorityMedium
@@ -1044,13 +1569,13 @@ func (m Model) handleBulkToggleStatus() (tea.Model, tea.Cmd) {
 
 	for _, task := range m.tasks {
 		if m.multiSelect.selectedTasks[task.ID] {
-			// toggle between pending/in_progress
-			if task.Status == domain.StatusPending {
-				task.Status = domain.StatusInProgress
-			} else if task.Status == domain.StatusInProgress {
-				task.Status = domain.StatusPending
-			} else {
-				task.Status = domain.StatusInProgress
+			switch task.Status {
+				case domain.StatusPending:
+					task.Status = domain.StatusInProgress
+				case domain.StatusInProgress:
+					task.Status = domain.StatusPending
+				default:
+					task.Status = domain.StatusInProgress
 			}
 			cmds = append(cmds, updateTaskCmd(m.ctx, m.repo, task))
 		}
@@ -1067,7 +1592,6 @@ func (m Model) handleBulkDelete() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// show confirmation dialog
 	m.confirm = confirmDialog{
 		message: fmt.Sprintf("Delete %d task(s)?", count),
 		active:  true,
@@ -1082,4 +1606,413 @@ func (m Model) handleBulkDelete() (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+
+func (m Model) handleProjectViewKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleNodes := m.getVisibleProjectNodes()
+	if len(visibleNodes) == 0 {
+		return m, nil
+	}
+
+	if m.projectCursor < 0 {
+		m.projectCursor = 0
+	}
+	if m.projectCursor >= len(visibleNodes) {
+		m.projectCursor = len(visibleNodes) - 1
+	}
+
+	switch {
+	case key.Matches(msg, m.keys.ToggleProjects):
+		m.viewMode = tableView
+		m.message = ""
+		return m, nil
+
+	case key.Matches(msg, m.keys.Back):
+		m.viewMode = tableView
+		m.selectedProject = nil
+		m.message = ""
+		return m, nil
+
+	case key.Matches(msg, m.keys.Up):
+		if m.projectCursor > 0 {
+			m.projectCursor--
+			m.selectedProject = visibleNodes[m.projectCursor].project
+			return m, fetchProjectStatsCmd(m.ctx, m.projectRepo, m.selectedProject.ID)
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.Down):
+		if m.projectCursor < len(visibleNodes)-1 {
+			m.projectCursor++
+			m.selectedProject = visibleNodes[m.projectCursor].project
+			return m, fetchProjectStatsCmd(m.ctx, m.projectRepo, m.selectedProject.ID)
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.ExpandProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			if len(node.children) > 0 {
+				m.projectExpanded[node.project.ID] = true
+				m.message = fmt.Sprintf("Expanded: %s", node.project.Name)
+			}
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.CollapseProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			if len(node.children) > 0 && m.projectExpanded[node.project.ID] {
+				m.projectExpanded[node.project.ID] = false
+				m.message = fmt.Sprintf("Collapsed: %s", node.project.Name)
+			} else if node.parent != nil {
+				for i, n := range visibleNodes {
+					if n.project.ID == node.parent.project.ID {
+						m.projectCursor = i
+						m.selectedProject = n.project
+						return m, fetchProjectStatsCmd(m.ctx, m.projectRepo, n.project.ID)
+					}
+				}
+			}
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.ViewProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			m.selectedProject = node.project
+			m.message = fmt.Sprintf("Selected: %s", node.project.Name)
+			return m, fetchProjectStatsCmd(m.ctx, m.projectRepo, node.project.ID)
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.NewProject):
+		m.initNewProjectForm()
+		m.viewMode = projectFormView
+		m.message = "Creating new project"
+		return m, nil
+
+	case key.Matches(msg, m.keys.EditProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			m.initEditProjectForm(node.project)
+			m.viewMode = projectFormView
+			m.message = fmt.Sprintf("Editing project: %s", node.project.Name)
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.DeleteProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			project := node.project
+
+			childCount := len(node.children)
+
+			confirmMsg := fmt.Sprintf("Delete project '%s' (ID: %d)?", project.Name, project.ID)
+			if childCount > 0 {
+				confirmMsg += fmt.Sprintf("\n  - %d child project(s) will be deleted", childCount)
+			}
+			confirmMsg += "\n  - Associated tasks will be orphaned (project_id set to NULL)"
+
+			m.confirm = confirmDialog{
+				message: confirmMsg,
+				active:  true,
+				onConfirm: func(model *Model) tea.Cmd {
+					return deleteProjectCmd(model.ctx, model.projectRepo, project.ID)
+				},
+			}
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.ArchiveProject):
+		if m.projectCursor < len(visibleNodes) {
+			node := visibleNodes[m.projectCursor]
+			project := node.project
+
+			isArchived := project.Status == domain.ProjectStatusArchived
+			action := "Archive"
+			if isArchived {
+				action = "Unarchive"
+			}
+
+			childCount := len(node.children)
+			confirmMsg := fmt.Sprintf("%s project '%s' (ID: %d)?", action, project.Name, project.ID)
+			if !isArchived && childCount > 0 {
+				confirmMsg += fmt.Sprintf("\n  - %d child project(s) will also be archived", childCount)
+			}
+
+			m.confirm = confirmDialog{
+				message: confirmMsg,
+				active:  true,
+				onConfirm: func(model *Model) tea.Cmd {
+					if isArchived {
+						updatedProject := *project
+						updatedProject.Status = domain.ProjectStatusActive
+						return updateProjectCmd(model.ctx, model.projectRepo, &updatedProject)
+					}
+					return archiveProjectCmd(model.ctx, model.projectRepo, project.ID)
+				},
+			}
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.ViewNotes):
+		if m.selectedProject != nil && m.selectedProject.HasNotes() {
+			m.initNotesViewer(m.selectedProject)
+			m.viewMode = notesView
+			m.message = "Viewing notes"
+		} else if m.selectedProject != nil {
+			m.message = "No notes for this project. Use 'project note' command to add notes."
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.Refresh):
+		m.loading = true
+		projectFilter := repository.ProjectFilter{ExcludeArchived: true}
+		return m, fetchProjectsCmd(m.ctx, m.projectRepo, projectFilter)
+
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+
+	case key.Matches(msg, m.keys.Help):
+		m.showHelp = !m.showHelp
+		return m, nil
+
+	case key.Matches(msg, m.keys.ViewPicker):
+		m.viewPicker.active = true
+		m.viewPicker.cursor = 0
+		m.viewPicker.views = m.savedViews
+		m.message = "View Picker (↑/↓: navigate, enter: select, esc: cancel)"
+		return m, nil
+
+	case key.Matches(msg, m.keys.FavoriteViews):
+		if len(m.favoriteViews) > 0 {
+			m.viewPicker.active = true
+			m.viewPicker.cursor = 0
+			m.viewPicker.views = m.favoriteViews
+			m.message = "Favorite Views (↑/↓: navigate, enter: select, esc: cancel)"
+		} else {
+			m.message = "No favorite views"
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.QuickAccess1):
+		return m.applyQuickAccessView(1)
+	case key.Matches(msg, m.keys.QuickAccess2):
+		return m.applyQuickAccessView(2)
+	case key.Matches(msg, m.keys.QuickAccess3):
+		return m.applyQuickAccessView(3)
+	case key.Matches(msg, m.keys.QuickAccess4):
+		return m.applyQuickAccessView(4)
+	case key.Matches(msg, m.keys.QuickAccess5):
+		return m.applyQuickAccessView(5)
+	case key.Matches(msg, m.keys.QuickAccess6):
+		return m.applyQuickAccessView(6)
+	case key.Matches(msg, m.keys.QuickAccess7):
+		return m.applyQuickAccessView(7)
+	case key.Matches(msg, m.keys.QuickAccess8):
+		return m.applyQuickAccessView(8)
+	case key.Matches(msg, m.keys.QuickAccess9):
+		return m.applyQuickAccessView(9)
+	}
+
+	return m, nil
+}
+
+func (m Model) handleNotesViewKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.notesViewer.active = false
+		m.viewMode = projectView
+		m.message = "Closed notes viewer"
+		return m, nil
+
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+
+	case key.Matches(msg, m.keys.Up):
+		m.notesViewer.viewport.LineUp(1)
+		return m, nil
+
+	case key.Matches(msg, m.keys.Down):
+		m.notesViewer.viewport.LineDown(1)
+		return m, nil
+
+	case msg.String() == "pgup":
+		m.notesViewer.viewport.ViewUp()
+		return m, cmd
+
+	case msg.String() == "pgdown":
+		m.notesViewer.viewport.ViewDown()
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m Model) updateViewPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.viewPicker.active = false
+			return m, nil
+
+		case "up", "k":
+			if m.viewPicker.cursor > 0 {
+				m.viewPicker.cursor--
+			}
+			return m, nil
+
+		case "down", "j":
+			if m.viewPicker.cursor < len(m.viewPicker.views)-1 {
+				m.viewPicker.cursor++
+			}
+			return m, nil
+
+		case "enter":
+			if m.viewPicker.cursor < len(m.viewPicker.views) {
+				selectedView := m.viewPicker.views[m.viewPicker.cursor]
+				m.viewPicker.selected = selectedView
+
+				m.viewPicker.active = false
+
+				return m, applyViewCmd(m.ctx, m.viewRepo, selectedView.ID)
+			}
+			return m, nil
+		}
+	case viewsLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.message = fmt.Sprintf("Failed to load views: %v", msg.err)
+			return m, nil
+		}
+		m.savedViews = msg.views
+
+		m.favoriteViews = []*domain.SavedView{}
+		m.quickAccessViews = make(map[int]*domain.SavedView)
+
+		for _, v := range m.savedViews {
+			if v.HotKey != nil && *v.HotKey >= 1 && *v.HotKey <= 9 {
+				m.quickAccessViews[*v.HotKey] = v
+			}
+			if v.IsFavorite {
+				m.favoriteViews = append(m.favoriteViews, v)
+			}
+		}
+
+		return m, nil
+
+	case viewAppliedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.message = fmt.Sprintf("Failed to apply view: %v", msg.err)
+			return m, nil
+		}
+
+		m.selectedView = msg.view
+		m.filter = m.convertViewFilterToTaskFilter(msg.view.FilterConfig)
+		m.currentPage = 1
+		m.message = fmt.Sprintf("Applied view: %s", msg.view.Name)
+
+		m.loading = true
+		return m, fetchTasksCmd(m.ctx, m.repo, m.filter, m.currentPage, m.pageSize)
+
+	case viewCreatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.message = fmt.Sprintf("Failed to create view: %v", msg.err)
+			return m, nil
+		}
+		m.savedViews = append(m.savedViews, msg.view)
+		m.message = fmt.Sprintf("Created view: %s", msg.view.Name)
+		return m, nil
+
+	case viewUpdatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.message = fmt.Sprintf("Failed to update view: %v", msg.err)
+			return m, nil
+		}
+		for i, v := range m.savedViews {
+			if v.ID == msg.view.ID {
+				m.savedViews[i] = msg.view
+				break
+			}
+		}
+		m.message = fmt.Sprintf("Updated view: %s", msg.view.Name)
+		return m, nil
+
+	case viewDeletedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.message = fmt.Sprintf("Failed to delete view: %v", msg.err)
+			return m, nil
+		}
+		m.savedViews = sliceRemoveByID(m.savedViews, msg.viewID)
+		m.message = "View deleted"
+		return m, nil
+
+	case searchHistoryLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.searchHistory = msg.history
+		return m, nil
+
+	case searchRecordedMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) applyQuickAccessView(hotKey int) (tea.Model, tea.Cmd) {
+	view, exists := m.quickAccessViews[hotKey]
+	if !exists {
+		m.message = fmt.Sprintf("No view assigned to key %d", hotKey)
+		return m, nil
+	}
+
+	m.selectedView = view
+	m.filter = m.convertViewFilterToTaskFilter(view.FilterConfig)
+	m.currentPage = 1
+	m.message = fmt.Sprintf("Applied view: %s", view.Name)
+
+	_ = m.viewRepo.RecordViewAccess(m.ctx, view.ID)
+
+	m.loading = true
+	return m, fetchTasksCmd(m.ctx, m.repo, m.filter, m.currentPage, m.pageSize)
+}
+
+func (m *Model) convertViewFilterToTaskFilter(vf domain.SavedViewFilter) repository.TaskFilter {
+	return repository.TaskFilter{
+		Status:      vf.Status,
+		Priority:    vf.Priority,
+		ProjectID:   vf.ProjectID,
+		Tags:        vf.Tags,
+		SearchQuery: vf.SearchQuery,
+		SearchMode:  vf.SearchMode,
+		SortBy:      vf.SortBy,
+		SortOrder:   vf.SortOrder,
+		DueDateFrom: vf.DueDateFrom,
+		DueDateTo:   vf.DueDateTo,
+	}
+}
+
+func sliceRemoveByID(views []*domain.SavedView, id int64) []*domain.SavedView {
+	result := make([]*domain.SavedView, 0, len(views))
+	for _, v := range views {
+		if v.ID != id {
+			result = append(result, v)
+		}
+	}
+	return result
 }

@@ -15,14 +15,12 @@ import (
 )
 
 func setupTestDB(t *testing.T) (*DB, func()) {
-	// create temp db file
 	tmpFile, err := os.CreateTemp("", "taskflow_test_*.db")
 	require.NoError(t, err)
 	tmpFile.Close()
 
 	dbPath := tmpFile.Name()
 
-	// initialize db
 	db, err := NewDB(Config{Path: dbPath})
 	require.NoError(t, err)
 
@@ -46,7 +44,6 @@ func TestTaskRepository_Create(t *testing.T) {
 		task.Description = "This is a test task"
 		task.Priority = domain.PriorityHigh
 		task.Tags = []string{"test", "important"}
-		task.Project = "Test Project"
 
 		err := repo.Create(ctx, task)
 		require.NoError(t, err)
@@ -85,7 +82,6 @@ func TestTaskRepository_GetByID(t *testing.T) {
 	originalTask.Description = "Test Description"
 	originalTask.Priority = domain.PriorityUrgent
 	originalTask.Tags = []string{"tag1", "tag2"}
-	originalTask.Project = "Project Alpha"
 
 	err := repo.Create(ctx, originalTask)
 	require.NoError(t, err)
@@ -100,7 +96,7 @@ func TestTaskRepository_GetByID(t *testing.T) {
 		assert.Equal(t, originalTask.Priority, retrieved.Priority)
 		assert.Equal(t, originalTask.Status, retrieved.Status)
 		assert.Equal(t, originalTask.Tags, retrieved.Tags)
-		assert.Equal(t, originalTask.Project, retrieved.Project)
+		assert.Nil(t, retrieved.ProjectID)
 	})
 
 	t.Run("get non-existent task", func(t *testing.T) {
@@ -118,9 +114,9 @@ func TestTaskRepository_List(t *testing.T) {
 	ctx := context.Background()
 
 	tasks := []*domain.Task{
-		{Title: "Task 1", Priority: domain.PriorityHigh, Status: domain.StatusPending, Project: "Project A"},
-		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusCompleted, Project: "Project A"},
-		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending, Project: "Project B"},
+		{Title: "Task 1", Priority: domain.PriorityHigh, Status: domain.StatusPending},
+		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusCompleted},
+		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending},
 	}
 
 	for _, task := range tasks {
@@ -158,17 +154,6 @@ func TestTaskRepository_List(t *testing.T) {
 		}
 	})
 
-	t.Run("filter by project", func(t *testing.T) {
-		retrieved, err := repo.List(ctx, repository.TaskFilter{
-			Project: "Project A",
-		})
-		require.NoError(t, err)
-		assert.GreaterOrEqual(t, len(retrieved), 2)
-
-		for _, task := range retrieved {
-			assert.Equal(t, "Project A", task.Project)
-		}
-	})
 }
 
 func TestTaskRepository_Update(t *testing.T) {
@@ -252,11 +237,11 @@ func TestTaskRepository_Count(t *testing.T) {
 	ctx := context.Background()
 
 	tasks := []*domain.Task{
-		{Title: "Task 1", Priority: domain.PriorityHigh, Status: domain.StatusPending, Project: "Project A"},
-		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusCompleted, Project: "Project A"},
-		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending, Project: "Project B"},
-		{Title: "Task 4", Priority: domain.PriorityMedium, Status: domain.StatusInProgress, Project: "Project B"},
-		{Title: "Task 5", Priority: domain.PriorityUrgent, Status: domain.StatusPending, Project: "Project C"},
+		{Title: "Task 1", Priority: domain.PriorityHigh, Status: domain.StatusPending},
+		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusCompleted},
+		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending},
+		{Title: "Task 4", Priority: domain.PriorityMedium, Status: domain.StatusInProgress},
+		{Title: "Task 5", Priority: domain.PriorityUrgent, Status: domain.StatusPending},
 	}
 
 	for _, task := range tasks {
@@ -286,13 +271,6 @@ func TestTaskRepository_Count(t *testing.T) {
 		assert.GreaterOrEqual(t, count, int64(2))
 	})
 
-	t.Run("count by project", func(t *testing.T) {
-		count, err := repo.Count(ctx, repository.TaskFilter{
-			Project: "Project A",
-		})
-		require.NoError(t, err)
-		assert.GreaterOrEqual(t, count, int64(2))
-	})
 
 	t.Run("count with multiple filters", func(t *testing.T) {
 		count, err := repo.Count(ctx, repository.TaskFilter{
@@ -303,13 +281,6 @@ func TestTaskRepository_Count(t *testing.T) {
 		assert.GreaterOrEqual(t, count, int64(2))
 	})
 
-	t.Run("count with no matches", func(t *testing.T) {
-		count, err := repo.Count(ctx, repository.TaskFilter{
-			Project: "Non-existent Project",
-		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(0), count)
-	})
 }
 
 func TestTaskRepository_Pagination(t *testing.T) {
@@ -419,7 +390,6 @@ func TestTaskRepository_Search(t *testing.T) {
 			Description: "Add login and signup functionality",
 			Priority:    domain.PriorityHigh,
 			Status:      domain.StatusPending,
-			Project:     "Backend",
 			Tags:        []string{"auth", "security"},
 		},
 		{
@@ -427,7 +397,6 @@ func TestTaskRepository_Search(t *testing.T) {
 			Description: "Users cannot log in after password reset",
 			Priority:    domain.PriorityUrgent,
 			Status:      domain.StatusInProgress,
-			Project:     "Backend",
 			Tags:        []string{"bug", "auth"},
 		},
 		{
@@ -435,7 +404,6 @@ func TestTaskRepository_Search(t *testing.T) {
 			Description: "Document the API endpoints",
 			Priority:    domain.PriorityMedium,
 			Status:      domain.StatusPending,
-			Project:     "Documentation",
 			Tags:        []string{"docs"},
 		},
 		{
@@ -443,7 +411,6 @@ func TestTaskRepository_Search(t *testing.T) {
 			Description: "Clean up code in auth module",
 			Priority:    domain.PriorityLow,
 			Status:      domain.StatusPending,
-			Project:     "Backend",
 			Tags:        []string{"refactor", "auth"},
 		},
 	}
@@ -700,5 +667,387 @@ func TestTaskRepository_Sorting(t *testing.T) {
 		retrieved, err := repo.List(ctx, filter)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, len(retrieved), 4)
+	})
+}
+
+func TestTaskRepository_BulkUpdate(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTaskRepository(db)
+	ctx := context.Background()
+
+	tasks := []*domain.Task{
+		{Title: "Task 1", Priority: domain.PriorityLow, Status: domain.StatusPending},
+		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusPending},
+		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusInProgress},
+		{Title: "Task 4", Priority: domain.PriorityLow, Status: domain.StatusPending},
+	}
+
+	for _, task := range tasks {
+		err := repo.Create(ctx, task)
+		require.NoError(t, err)
+	}
+
+	t.Run("bulk update status", func(t *testing.T) {
+		newStatus := domain.StatusCompleted
+		updates := repository.TaskUpdate{
+			Status: &newStatus,
+		}
+
+		filter := repository.TaskFilter{
+			Status: domain.StatusPending,
+		}
+
+		count, err := repo.BulkUpdate(ctx, filter, updates)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), count)
+
+		updated, err := repo.List(ctx, repository.TaskFilter{Status: domain.StatusCompleted})
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(updated), 3)
+	})
+
+	t.Run("bulk update priority", func(t *testing.T) {
+		newPriority := domain.PriorityUrgent
+		updates := repository.TaskUpdate{
+			Priority: &newPriority,
+		}
+
+		filter := repository.TaskFilter{
+			Status: domain.StatusInProgress,
+		}
+
+		count, err := repo.BulkUpdate(ctx, filter, updates)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(1))
+
+		task, err := repo.GetByID(ctx, tasks[2].ID)
+		require.NoError(t, err)
+		assert.Equal(t, domain.PriorityUrgent, task.Priority)
+	})
+
+	t.Run("bulk update multiple fields", func(t *testing.T) {
+		newStatus := domain.StatusCancelled
+		newPriority := domain.PriorityLow
+		newDesc := "Bulk updated description"
+
+		updates := repository.TaskUpdate{
+			Status:      &newStatus,
+			Priority:    &newPriority,
+			Description: &newDesc,
+		}
+
+		filter := repository.TaskFilter{}
+
+		count, err := repo.BulkUpdate(ctx, filter, updates)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(4))
+
+		task, err := repo.GetByID(ctx, tasks[0].ID)
+		require.NoError(t, err)
+		assert.Equal(t, domain.StatusCancelled, task.Status)
+		assert.Equal(t, domain.PriorityLow, task.Priority)
+		assert.Equal(t, "Bulk updated description", task.Description)
+	})
+
+	t.Run("bulk update with no matches", func(t *testing.T) {
+		nonExistentID := int64(99999)
+		filter := repository.TaskFilter{
+			ProjectID: &nonExistentID,
+		}
+
+		newStatus := domain.StatusCompleted
+		updates := repository.TaskUpdate{
+			Status: &newStatus,
+		}
+
+		count, err := repo.BulkUpdate(ctx, filter, updates)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
+}
+
+func TestTaskRepository_BulkMove(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	taskRepo := NewTaskRepository(db)
+	projectRepo := NewProjectRepository(db)
+	ctx := context.Background()
+
+	project1 := &domain.Project{Name: "Project 1", Status: domain.ProjectStatusActive}
+	err := projectRepo.Create(ctx, project1)
+	require.NoError(t, err)
+
+	project2 := &domain.Project{Name: "Project 2", Status: domain.ProjectStatusActive}
+	err = projectRepo.Create(ctx, project2)
+	require.NoError(t, err)
+
+	tasks := []*domain.Task{
+		{Title: "Task 1", Priority: domain.PriorityLow, Status: domain.StatusPending, ProjectID: &project1.ID},
+		{Title: "Task 2", Priority: domain.PriorityHigh, Status: domain.StatusPending, ProjectID: &project1.ID},
+		{Title: "Task 3", Priority: domain.PriorityLow, Status: domain.StatusInProgress, ProjectID: &project1.ID},
+	}
+
+	for _, task := range tasks {
+		err := taskRepo.Create(ctx, task)
+		require.NoError(t, err)
+	}
+
+	t.Run("bulk move tasks between projects", func(t *testing.T) {
+		filter := repository.TaskFilter{
+			ProjectID: &project1.ID,
+			Status:    domain.StatusPending,
+		}
+
+		count, err := taskRepo.BulkMove(ctx, filter, &project2.ID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), count)
+
+		movedTasks, err := taskRepo.List(ctx, repository.TaskFilter{ProjectID: &project2.ID})
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(movedTasks), 2)
+
+		remainingTasks, err := taskRepo.List(ctx, repository.TaskFilter{ProjectID: &project1.ID})
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(remainingTasks), 1)
+	})
+
+	t.Run("bulk move to nil project (unassign)", func(t *testing.T) {
+		filter := repository.TaskFilter{
+			ProjectID: &project1.ID,
+		}
+
+		count, err := taskRepo.BulkMove(ctx, filter, nil)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(1))
+
+		task, err := taskRepo.GetByID(ctx, tasks[2].ID)
+		require.NoError(t, err)
+		assert.Nil(t, task.ProjectID)
+	})
+}
+
+func TestTaskRepository_BulkAddTags(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTaskRepository(db)
+	ctx := context.Background()
+
+	tasks := []*domain.Task{
+		{Title: "Task 1", Priority: domain.PriorityLow, Status: domain.StatusPending, Tags: []string{"tag1"}},
+		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusPending, Tags: []string{"tag2"}},
+		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending, Tags: []string{}},
+	}
+
+	for _, task := range tasks {
+		err := repo.Create(ctx, task)
+		require.NoError(t, err)
+	}
+
+	t.Run("bulk add tags to multiple tasks", func(t *testing.T) {
+		filter := repository.TaskFilter{
+			Status: domain.StatusPending,
+		}
+
+		newTags := []string{"urgent", "reviewed"}
+		count, err := repo.BulkAddTags(ctx, filter, newTags)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(3))
+
+		for _, task := range tasks {
+			updated, err := repo.GetByID(ctx, task.ID)
+			require.NoError(t, err)
+			assert.Contains(t, updated.Tags, "urgent")
+			assert.Contains(t, updated.Tags, "reviewed")
+		}
+	})
+
+	t.Run("bulk add tags avoids duplicates", func(t *testing.T) {
+		filter := repository.TaskFilter{}
+
+		newTags := []string{"urgent", "new-tag"}
+		count, err := repo.BulkAddTags(ctx, filter, newTags)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(3))
+
+		task, err := repo.GetByID(ctx, tasks[0].ID)
+		require.NoError(t, err)
+
+		tagCount := make(map[string]int)
+		for _, tag := range task.Tags {
+			tagCount[tag]++
+		}
+		for tag, count := range tagCount {
+			assert.Equal(t, 1, count, "Tag %s should not be duplicated", tag)
+		}
+	})
+}
+
+func TestTaskRepository_BulkRemoveTags(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTaskRepository(db)
+	ctx := context.Background()
+
+	tasks := []*domain.Task{
+		{Title: "Task 1", Priority: domain.PriorityLow, Status: domain.StatusPending,
+			Tags: []string{"bug", "critical", "backend"}},
+		{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusPending,
+			Tags: []string{"bug", "frontend", "ui"}},
+		{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending,
+			Tags: []string{"feature", "backend"}},
+	}
+
+	for _, task := range tasks {
+		err := repo.Create(ctx, task)
+		require.NoError(t, err)
+	}
+
+	t.Run("bulk remove tags from multiple tasks", func(t *testing.T) {
+		filter := repository.TaskFilter{
+			Status: domain.StatusPending,
+		}
+
+		tagsToRemove := []string{"bug"}
+		count, err := repo.BulkRemoveTags(ctx, filter, tagsToRemove)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(2))
+
+		task1, err := repo.GetByID(ctx, tasks[0].ID)
+		require.NoError(t, err)
+		assert.NotContains(t, task1.Tags, "bug")
+		assert.Contains(t, task1.Tags, "critical")
+
+		task2, err := repo.GetByID(ctx, tasks[1].ID)
+		require.NoError(t, err)
+		assert.NotContains(t, task2.Tags, "bug")
+		assert.Contains(t, task2.Tags, "frontend")
+	})
+
+	t.Run("bulk remove multiple tags", func(t *testing.T) {
+		filter := repository.TaskFilter{}
+
+		tagsToRemove := []string{"backend", "frontend"}
+		count, err := repo.BulkRemoveTags(ctx, filter, tagsToRemove)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(3))
+
+		for _, task := range tasks {
+			updated, err := repo.GetByID(ctx, task.ID)
+			require.NoError(t, err)
+			assert.NotContains(t, updated.Tags, "backend")
+			assert.NotContains(t, updated.Tags, "frontend")
+		}
+	})
+
+	t.Run("bulk remove non-existent tags", func(t *testing.T) {
+		filter := repository.TaskFilter{}
+
+		tagsToRemove := []string{"nonexistent"}
+		count, err := repo.BulkRemoveTags(ctx, filter, tagsToRemove)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(0))
+	})
+}
+
+func TestTaskRepository_BulkDelete(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTaskRepository(db)
+	ctx := context.Background()
+
+	t.Run("bulk delete filtered tasks", func(t *testing.T) {
+		tasks := []*domain.Task{
+			{Title: "Task 1", Priority: domain.PriorityLow, Status: domain.StatusCancelled},
+			{Title: "Task 2", Priority: domain.PriorityLow, Status: domain.StatusCancelled},
+			{Title: "Task 3", Priority: domain.PriorityHigh, Status: domain.StatusPending},
+			{Title: "Task 4", Priority: domain.PriorityMedium, Status: domain.StatusCancelled},
+		}
+
+		for _, task := range tasks {
+			err := repo.Create(ctx, task)
+			require.NoError(t, err)
+		}
+
+		filter := repository.TaskFilter{
+			Status: domain.StatusCancelled,
+		}
+
+		count, err := repo.BulkDelete(ctx, filter)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), count)
+
+		for i, task := range tasks {
+			if i < 3 && tasks[i].Status == domain.StatusCancelled {
+				_, err := repo.GetByID(ctx, task.ID)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "task not found")
+			}
+		}
+
+		_, err = repo.GetByID(ctx, tasks[2].ID)
+		require.NoError(t, err)
+	})
+
+	t.Run("bulk delete by priority", func(t *testing.T) {
+		tasks := []*domain.Task{
+			{Title: "Task A", Priority: domain.PriorityLow, Status: domain.StatusPending},
+			{Title: "Task B", Priority: domain.PriorityLow, Status: domain.StatusPending},
+			{Title: "Task C", Priority: domain.PriorityHigh, Status: domain.StatusPending},
+		}
+
+		for _, task := range tasks {
+			err := repo.Create(ctx, task)
+			require.NoError(t, err)
+		}
+
+		filter := repository.TaskFilter{
+			Priority: domain.PriorityLow,
+		}
+
+		count, err := repo.BulkDelete(ctx, filter)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(2))
+
+		_, err = repo.GetByID(ctx, tasks[2].ID)
+		require.NoError(t, err)
+	})
+
+	t.Run("bulk delete with no matches", func(t *testing.T) {
+		nonExistentID := int64(99999)
+		filter := repository.TaskFilter{
+			ProjectID: &nonExistentID,
+		}
+
+		count, err := repo.BulkDelete(ctx, filter)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
+
+	t.Run("bulk delete all tasks", func(t *testing.T) {
+		tasks := []*domain.Task{
+			{Title: "Task X", Priority: domain.PriorityMedium, Status: domain.StatusPending},
+			{Title: "Task Y", Priority: domain.PriorityMedium, Status: domain.StatusPending},
+		}
+
+		for _, task := range tasks {
+			err := repo.Create(ctx, task)
+			require.NoError(t, err)
+		}
+
+		filter := repository.TaskFilter{}
+		count, err := repo.BulkDelete(ctx, filter)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, count, int64(2))
+
+		for _, task := range tasks {
+			_, err := repo.GetByID(ctx, task.ID)
+			assert.Error(t, err)
+		}
 	})
 }

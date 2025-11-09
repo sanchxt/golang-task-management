@@ -33,13 +33,14 @@ type Task struct {
 	Priority    Priority   `db:"priority" json:"priority"`
 	Status      Status     `db:"status" json:"status"`
 	Tags        []string   `db:"tags" json:"tags"`
-	Project     string     `db:"project" json:"project"`
+	ProjectID   *int64     `db:"project_id" json:"project_id,omitempty"`
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt   time.Time  `db:"updated_at" json:"updated_at"`
 	DueDate     *time.Time `db:"due_date" json:"due_date,omitempty"`
+
+	ProjectName string `db:"-" json:"project_name,omitempty"`
 }
 
-// checks for valid task data
 func (t *Task) Validate() error {
 	if strings.TrimSpace(t.Title) == "" {
 		return errors.New("task title cannot be empty")

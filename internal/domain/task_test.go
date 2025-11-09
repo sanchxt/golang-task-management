@@ -97,7 +97,6 @@ func TestTaskValidate(t *testing.T) {
 				Priority:    PriorityUrgent,
 				Status:      StatusInProgress,
 				Tags:        []string{"tag1", "tag2"},
-				Project:     "Project Alpha",
 			},
 			wantErr: false,
 		},
