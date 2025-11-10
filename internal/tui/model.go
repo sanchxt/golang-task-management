@@ -333,27 +333,28 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m *Model) taskToRow(task *domain.Task) table.Row {
-	checkbox := "  "
-	if m.multiSelect.enabled {
-		if m.multiSelect.selectedTasks[task.ID] {
-			checkbox = "☑ "
-		} else {
-			checkbox = "☐ "
-		}
+	// Add selection indicator if task is selected in multi-select mode
+	selectionIndicator := ""
+	if m.multiSelect.enabled && m.multiSelect.selectedTasks[task.ID] {
+		selectionIndicator = "✓ "
 	}
 
 	// status
 	statusIcon := display.GetStatusIcon(task.Status)
-	status := fmt.Sprintf("%s%s %s", checkbox, statusIcon, task.Status)
+	status := fmt.Sprintf("%s%s %s", selectionIndicator, statusIcon, task.Status)
 
 	// priority
 	priorityIcon := display.GetPriorityIcon(task.Priority)
 	priority := fmt.Sprintf("%s %s", priorityIcon, task.Priority)
 
-	// truncate title
+	// truncate title - adjust for selection indicator
+	maxTitleLen := 37
+	if selectionIndicator != "" {
+		maxTitleLen = 35 // Slightly shorter to compensate for indicator
+	}
 	title := task.Title
-	if len(title) > 37 {
-		title = title[:37] + "..."
+	if len(title) > maxTitleLen {
+		title = title[:maxTitleLen] + "..."
 	}
 
 	// project
@@ -377,6 +378,7 @@ func (m *Model) taskToRow(task *domain.Task) table.Row {
 		dueDate = display.FormatDueDate(task.DueDate)
 	}
 
+	// Apply project color if available
 	var rowStyle lipgloss.Style
 	hasColor := false
 	if task.ProjectID != nil {
@@ -391,6 +393,7 @@ func (m *Model) taskToRow(task *domain.Task) table.Row {
 		}
 	}
 
+	// Apply color styling if project has a color
 	if hasColor {
 		status = rowStyle.Render(status)
 		priority = rowStyle.Render(priority)

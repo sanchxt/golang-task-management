@@ -1488,6 +1488,7 @@ func (m Model) handleToggleMultiSelect() (tea.Model, tea.Cmd) {
 	if !m.multiSelect.enabled {
 		m.multiSelect.selectedTasks = make(map[int64]bool)
 	}
+	m.updateTableRows()
 	return m, nil
 }
 
@@ -1503,6 +1504,7 @@ func (m Model) handleToggleSelection() (tea.Model, tea.Cmd) {
 		m.multiSelect.selectedTasks[task.ID] = true
 	}
 
+	m.updateTableRows()
 	return m, nil
 }
 
@@ -1510,11 +1512,13 @@ func (m Model) handleSelectAll() (tea.Model, tea.Cmd) {
 	for _, task := range m.tasks {
 		m.multiSelect.selectedTasks[task.ID] = true
 	}
+	m.updateTableRows()
 	return m, nil
 }
 
 func (m Model) handleDeselectAll() (tea.Model, tea.Cmd) {
 	m.multiSelect.selectedTasks = make(map[int64]bool)
+	m.updateTableRows()
 	return m, nil
 }
 
