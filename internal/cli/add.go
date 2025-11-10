@@ -6,12 +6,14 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
 	"task-management/internal/config"
 	"task-management/internal/domain"
 	"task-management/internal/repository/sqlite"
 	"task-management/internal/theme"
+	"task-management/internal/tui"
 )
 
 var (
@@ -28,12 +30,16 @@ var addCmd = &cobra.Command{
 	Short: "Add a new task",
 	Long: `Add a new task to your task list.
 
+If no arguments or flags are provided, an interactive TUI form will open.
+Otherwise, the task will be created directly with the provided values.
+
 Examples:
-  taskflow add "Implement user authentication"
+  taskflow add                                             # Open TUI form
+  taskflow add "Implement user authentication"             # CLI mode
   taskflow add "Fix login bug" --priority high --project Backend
   taskflow add "Write documentation" --tags docs,important --due-date "2024-12-31"
   taskflow add "Database optimization" --project 1 --priority high`,
-	Args: cobra.MinimumNArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: runAdd,
 }
 
@@ -49,16 +55,11 @@ func init() {
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
-	// get title
-	title := strings.Join(args, " ")
-
-	// get config
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// load theme
 	themeName := cfg.ThemeName
 	if themeName == "" {
 		themeName = "default"
@@ -70,7 +71,19 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	styles := theme.NewStyles(themeObj)
 
-	// initialize db
+	shouldUseTUI := len(args) == 0 &&
+		addPriority == "medium" &&
+		addDescription == "" &&
+		addProject == "" &&
+		len(addTags) == 0 &&
+		addDueDate == ""
+
+	if shouldUseTUI {
+		return runAddWithTUI(cfg, themeObj, styles)
+	}
+
+	title := strings.Join(args, " ")
+
 	db, err := sqlite.NewDB(sqlite.Config{Path: cfg.DBPath})
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
@@ -85,7 +98,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	task.Priority = domain.Priority(addPriority)
 	task.Tags = addTags
 
-	// lookup project
 	if addProject != "" {
 		projectRepo := sqlite.NewProjectRepository(db)
 		projectID, err := lookupProjectID(ctx, projectRepo, addProject)
@@ -163,4 +175,46 @@ func displayTaskCreated(task *domain.Task, styles *theme.Styles) {
 	}
 
 	fmt.Println()
+}
+
+func runAddWithTUI(cfg *config.Config, themeObj *theme.Theme, styles *theme.Styles) error {
+	db, err := sqlite.NewDB(sqlite.Config{Path: cfg.DBPath})
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer db.Close()
+
+	repo := sqlite.NewTaskRepository(db)
+	projectRepo := sqlite.NewProjectRepository(db)
+	ctx := context.Background()
+
+	model := tui.NewAddFormModel(ctx, projectRepo, themeObj, styles)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("failed to run TUI: %w", err)
+	}
+
+	addFormModel, ok := finalModel.(tui.AddFormModel)
+	if !ok {
+		return fmt.Errorf("unexpected model type")
+	}
+
+	task := addFormModel.GetCreatedTask()
+	if task == nil {
+		fmt.Println()
+		fmt.Println(styles.Info.Render("Task creation cancelled."))
+		fmt.Println()
+		return nil
+	}
+
+	if err := repo.Create(ctx, task); err != nil {
+		fmt.Println(styles.Error.Render(fmt.Sprintf("✗ Failed to create task: %v", err)))
+		return nil
+	}
+
+	displayTaskCreated(task, styles)
+
+	return nil
 }
